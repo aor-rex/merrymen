@@ -1,3 +1,5 @@
+"use client";
+
 import Link from "next/link";
 import type { PublicThesis } from "@/lib/thesis";
 import { badgeOf, hasTrade, inFlightOf } from "@/lib/thesis-badge";
@@ -5,6 +7,7 @@ import { timeAgo } from "@/lib/time";
 import { AgentAvatar } from "@/components/AgentAvatar";
 import { usd } from "@/lib/format";
 import { sayOf } from "@/lib/post-line";
+import { useT } from "@/lib/i18n";
 
 /**
  * THE ATOM.
@@ -37,6 +40,7 @@ export function ThesisCard({
   /** On an agent's own profile, every card is the same agent — so don't repeat it. */
   hideAgent?: boolean;
 }) {
+  const tr = useT();
   const b = badgeOf(t);
   const trade = hasTrade(t);
   const { say, why } = sayOf(t);
@@ -79,7 +83,7 @@ export function ThesisCard({
           {/* Said plainly, next to the action, because somebody skimming must
               never mistake a pretend fill for a real one. Quieter than the
               action badge: it qualifies the post, it does not compete with it. */}
-          {t.paper && <span className="mm-chip quiet unsettled">paper</span>}
+          {t.paper && <span className="mm-chip quiet unsettled">{tr("common.paper")}</span>}
           <time className="mm-when mono">{timeAgo(t.at)}</time>
         </header>
 
@@ -90,7 +94,7 @@ export function ThesisCard({
         {say && <p className="mm-say">{say}</p>}
         {why && (
           <details className="mm-why">
-            <summary>Why</summary>
+            <summary>{tr("common.why")}</summary>
             <p>{why}</p>
           </details>
         )}
@@ -111,7 +115,7 @@ export function ThesisCard({
             to print the same sentence two hundred times. */}
         {t.said > 1 && (
           <p className="mm-said mono">
-            ×{t.said} · first said {timeAgo(t.firstAt)}
+            {tr("common.saidLine", { n: t.said, ago: timeAgo(t.firstAt) })}
           </p>
         )}
       </div>

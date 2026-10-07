@@ -5,6 +5,7 @@ import Link from "next/link";
 import type { MarketData } from "@/lib/market";
 import { compactUsd, count, subCentUsd, usdFixed } from "@/lib/format";
 import { MovingFigure } from "@/terminal/ui";
+import { useT } from "@/lib/i18n";
 
 /**
  * THE TAPE ALONG THE BOTTOM.
@@ -64,6 +65,7 @@ export function TickerStrip({
   /** Controls that belong on the tape — the terminal's sound toggle. */
   children?: ReactNode;
 }) {
+  const tr = useT();
   if (!items.length && !wall) return null;
   return (
     <aside className={className ? `mm-ticker ${className}` : "mm-ticker"} aria-label="Market">
@@ -73,11 +75,11 @@ export function TickerStrip({
             with how many intents the wall turned back today. */}
         {wall && (
           <Link href="/" className="mm-tick fleet">
-            <span className="k">wall</span>
+            <span className="k">{tr("shell.tickWall")}</span>
             <b className="mono warn">{count(wall.turned)}</b>
-            <span className="mono dim">turned</span>
+            <span className="mono dim">{tr("shell.tickTurned")}</span>
             <b className="mono up">{count(wall.through)}</b>
-            <span className="mono dim">through</span>
+            <span className="mono dim">{tr("shell.tickThrough")}</span>
           </Link>
         )}
 
@@ -100,10 +102,10 @@ export function TickerStrip({
                 an hour is not a current price, and a tape that implies it is
                 is worse than one that admits it. */}
             {t.halted ? (
-              <span className="mono halted">halted</span>
+              <span className="mono halted">{tr("shell.halted")}</span>
             ) : t.stale ? (
-              <span className="mono stale" title="This feed has not updated in over an hour">
-                stale
+              <span className="mono stale" title={tr("shell.staleTitle")}>
+                {tr("shell.stale")}
               </span>
             ) : null}
           </Link>

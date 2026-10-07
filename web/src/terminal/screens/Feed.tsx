@@ -5,6 +5,7 @@ import type { LiveAgent, LiveToken, ReadState, Thesis } from "../live";
 import { Empty, ReadEmpty } from "../ui";
 import { useLikes } from "../likes";
 import { Wire, type Mention } from "../wire";
+import { useT } from "@/lib/i18n";
 
 /**
  * THE FEED, AND THE FILTER THAT STOPPED BEING A DRAWER.
@@ -32,12 +33,12 @@ import { Wire, type Mention } from "../wire";
  * changed hold keeps its own row, and Holds lays every one of them out again.
  * Counted, never dropped.
  */
-const PILLS: { id: Pill; label: string }[] = [
-  { id: "all", label: "All" },
-  { id: "trades", label: "Trades" },
-  { id: "theses", label: "Theses" },
-  { id: "holds", label: "Holds" },
-  { id: "debate", label: "Debates" },
+const PILLS: { id: Pill; key: "feed.pillAll" | "feed.pillTrades" | "feed.pillTheses" | "feed.pillHolds" | "feed.pillDebate" }[] = [
+  { id: "all", key: "feed.pillAll" },
+  { id: "trades", key: "feed.pillTrades" },
+  { id: "theses", key: "feed.pillTheses" },
+  { id: "holds", key: "feed.pillHolds" },
+  { id: "debate", key: "feed.pillDebate" },
 ];
 
 export function Feed({
@@ -62,6 +63,7 @@ export function Feed({
 }) {
   const [pill, setPill] = useState<Pill>("all");
   const [sort, setSort] = useState("latest");
+  const t = useT();
   // "REAL MONEY": off by default, so the feed still shows the fleet — most of
   // it is paper, labelled — and one tap shows only what moved real money.
   // Session state, not stored: a filter a reader forgot they set would make
@@ -98,7 +100,7 @@ export function Feed({
   return (
     <div className="page feed-page">
       <header className="feed-head">
-        {compact ? <h2>Latest activity</h2> : <h1 className="top-title">Feed</h1>}
+        {compact ? <h2>{t("feed.latestActivity")}</h2> : <h1 className="top-title">{t("feed.title")}</h1>}
       </header>
 
       <div className="feed-views" role="group" aria-label="Filter the feed">
@@ -110,7 +112,7 @@ export function Feed({
             className={active === p.id ? "on" : ""}
             onClick={() => setPill(p.id)}
           >
-            {p.label}
+            {t(p.key)}
           </button>
         ))}
       </div>
@@ -119,14 +121,14 @@ export function Feed({
           type="button"
           className={realOnly ? "feed-real on" : "feed-real"}
           aria-pressed={realOnly}
-          title={realOnly ? "Showing only agents trading real money" : "Hide agents on a paper book"}
+          title={realOnly ? t("feed.realOnlyOn") : t("feed.realOnlyOff")}
           onClick={() => setRealOnly((v) => !v)}
         >
-          Real money
+          {t("feed.realMoney")}
         </button>
       </div>
-      {likes && <div className="feed-sort-row"><label className="feed-sort"><span className="sr-only">Sort posts</span><select aria-label="Sort posts" value={sort} onChange={event=>setSort(event.target.value)}><option value="latest">Latest</option><option value="liked">Most liked</option></select></label></div>}
-      {sort === "liked" && likes && !likes.read && <p role="status">Likes unavailable.</p>}
+      {likes && <div className="feed-sort-row"><label className="feed-sort"><span className="sr-only">Sort posts</span><select aria-label="Sort posts" value={sort} onChange={event=>setSort(event.target.value)}><option value="latest">{t("feed.latest")}</option><option value="liked">{t("feed.mostLiked")}</option></select></label></div>}
+      {sort === "liked" && likes && !likes.read && <p role="status">{t("feed.likesUnavailable")}</p>}
       {shown.length === 0 ? (
         beats.length > 0 && (active !== "all" || realOnly) ? (
           // FILTERED-EMPTY IS NOT QUIET. The read succeeded and the rows are
@@ -138,7 +140,7 @@ export function Feed({
           <Empty
             title={emptyFor(active, likes?.read ?? false, realOnly)}
             action={{
-              label: "Show everything",
+              label: t("feed.showEverything"),
               onClick: () => {
                 setPill("all");
                 setRealOnly(false);
@@ -148,8 +150,8 @@ export function Feed({
         ) : (
           <ReadEmpty
             state={read}
-            title="Quiet."
-            action={{ label: "Fund an agent", onClick: onDesk }}
+            title={t("feed.quiet")}
+            action={{ label: t("feed.fundAgent"), onClick: onDesk }}
           />
         )
       ) : (

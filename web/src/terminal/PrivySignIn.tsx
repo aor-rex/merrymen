@@ -37,21 +37,12 @@ import {
 } from "@privy-io/react-auth";
 import { requestJson } from "./request-json";
 import { createPrivyWalletOnce } from "./privy-wallet-creation";
+import { useT } from "@/lib/i18n";
 
 export const PRIVY_WALLET_TIMEOUT_MS = 45_000;
 export const PRIVY_PROOF_TIMEOUT_MS = 60_000;
 
 type Phase = "idle" | "authorising" | "provisioning" | "proving" | "done" | "error" | "resetting";
-
-const LABEL: Record<Phase, string> = {
-  idle: "Continue with X",
-  authorising: "Waiting for X…",
-  provisioning: "Creating your wallet…",
-  proving: "Signing you in…",
-  done: "Signed in",
-  error: "Try again",
-  resetting: "Signing out…",
-};
 
 interface Attempt {
   userId: string;
@@ -63,6 +54,18 @@ interface Attempt {
 }
 
 export function PrivySignIn({ onDone }: { onDone: () => void }) {
+  const t = useT();
+  const labelFor = (phase: Phase): string => {
+    switch (phase) {
+      case "idle": return t("common.privyContinue");
+      case "authorising": return t("common.privyWaiting");
+      case "provisioning": return t("common.privyCreating");
+      case "proving": return t("common.privySigning");
+      case "done": return t("common.privyDone");
+      case "error": return t("common.tryAgain");
+      case "resetting": return t("common.privyResetting");
+    }
+  };
   const { ready, authenticated, getAccessToken, user, logout } = usePrivy();
   const { wallets, ready: walletsReady } = useWallets();
   const { createWallet } = useCreateWallet();
@@ -101,7 +104,7 @@ export function PrivySignIn({ onDone }: { onDone: () => void }) {
     onError: () => {
       if (!mounted.current) return;
       cancelAttempt();
-      setError("Sign-in didn't finish. Try again.");
+      setError(t("common.privyUnfinished"));
       setPhase("error");
     },
   });
@@ -122,7 +125,7 @@ export function PrivySignIn({ onDone }: { onDone: () => void }) {
     const signal = pending.controller.signal;
     const token = await getAccessToken();
     if (!isCurrent(pending)) return;
-    if (!token) throw new Error("Your sign-in expired. Try again.");
+    if (!token) throw new Error(t("common.privyExpired"));
     const challenge = await requestJson<{ nonce: string; message: string }>("/api/auth/privy", { signal });
     if (!isCurrent(pending)) return;
     const provider = await wallet.getEthereumProvider();
@@ -164,7 +167,7 @@ export function PrivySignIn({ onDone }: { onDone: () => void }) {
       pending = {
         userId: user.id, controller: new AbortController(), creating: false, proving: false,
         timer: setTimeout(() => {
-          fail(pending!, "Your wallet didn't become available. Try again, or start over to reconnect your account.");
+          fail(pending!, t("common.privyNoWallet"));
         }, PRIVY_WALLET_TIMEOUT_MS),
       };
       attempt.current = pending;
@@ -183,11 +186,11 @@ export function PrivySignIn({ onDone }: { onDone: () => void }) {
       pending.proving = true;
       clearTimeout(pending.timer);
       pending.timer = setTimeout(() => {
-        fail(pending!, "Signing in took too long. Try again and approve the wallet signature when prompted.");
+        fail(pending!, t("common.privyTooLong"));
       }, PRIVY_PROOF_TIMEOUT_MS);
       setPhase("proving");
       void finish(embedded, pending).catch((e: unknown) => {
-        fail(pending!, e instanceof Error ? e.message : "Sign-in failed. Try again.");
+        fail(pending!, e instanceof Error ? e.message : t("common.privySigninFailed"));
       });
     } else if (!linkedWallets.length && !pending.creating) {
       pending.creating = true;
@@ -198,7 +201,7 @@ export function PrivySignIn({ onDone }: { onDone: () => void }) {
         pending!.createdAddress = wallet.address;
         refresh((value) => value + 1);
       }).catch(() => {
-        fail(pending!, "We couldn't create your wallet. Try again, or start over to reconnect your account.");
+        fail(pending!, t("common.privyCreateFailed"));
       });
     }
   }, [ready, authenticated, user, walletsReady, embedded, isOpen, phase, revision, createWallet, fail, finish, isCurrent]);
@@ -213,12 +216,12 @@ export function PrivySignIn({ onDone }: { onDone: () => void }) {
       if (mounted.current && !session.current.authenticated) setPhase("idle");
     } catch {
       if (!mounted.current) return;
-      setError("Couldn't sign out. Try starting over again.");
+      setError(t("common.privySignoutFailed"));
       setPhase("error");
     }
   }
 
-  if (!ready) return <div className="hosted-auth"><button className="flow-primary" disabled>Loading…</button></div>;
+  if (!ready) return <div className="hosted-auth"><button className="flow-primary" disabled>{t("groupchat.loading")}</button></div>;
 
   return (
     <div className="hosted-auth">
@@ -233,18 +236,18 @@ export function PrivySignIn({ onDone }: { onDone: () => void }) {
             refresh((value) => value + 1);
           } else {
             setPhase("authorising");
-            try { login(); } catch { setError("Sign-in didn't finish. Try again."); setPhase("error"); }
+            try { login(); } catch { setError(t("common.privyUnfinished")); setPhase("error"); }
           }
         }}
       >
-        {LABEL[phase]}
+        {labelFor(phase)}
       </button>
       {phase === "provisioning" && (
-        <p className="flow-note">Setting up the wallet that will own your Merryman. This happens once.</p>
+        <p className="flow-note">{t("common.privySetupNote")}</p>
       )}
       {error && <p role="alert" className="flow-error">{error}</p>}
       {(authenticated || error) && phase !== "done" && (
-        <button className="flow-secondary" disabled={phase === "resetting"} onClick={() => void startOver()}>Start over</button>
+        <button className="flow-secondary" disabled={phase === "resetting"} onClick={() => void startOver()}>{t("common.privyStartOver")}</button>
       )}
     </div>
   );

@@ -18,6 +18,9 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { describe, it } from "node:test";
+import { EN } from "../lib/messages/en";
+
+const EN_TEXT = Object.values(EN).join("\n");
 
 const SIGNOUT = readFileSync(new URL("./SignOut.tsx", import.meta.url), "utf8");
 const APP = readFileSync(new URL("./App.tsx", import.meta.url), "utf8");
@@ -81,8 +84,13 @@ describe("sign out is findable, and says who you are", () => {
   it("shows the signed-in address, which no screen used to", () => {
     // The tenant address is the one fact that says which account you are
     // operating, and the owner had to be told it out of an API response.
-    assert.match(APP, /signed in as <code>\{account\.session\.address\}<\/code>/);
-    assert.match(WALLET, /signed in as <code>\{session\.address\}<\/code>/);
+    // i18n: the words live in the catalogue now; pin the key at the call site
+    // and the wording in EN.
+    assert.match(APP, /t\("wallet\.signedInAs"\)/);
+    assert.match(APP, /account\.session\.address/);
+    assert.match(WALLET, /t\("wallet\.signedInAs"\)/);
+    assert.match(WALLET, /session\.address/);
+    assert.match(EN_TEXT, /signed in as/);
   });
 
   it("shows the ADDRESS only — never a key", () => {

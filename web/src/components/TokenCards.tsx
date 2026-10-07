@@ -4,6 +4,9 @@ import { useState } from "react";
 import Link from "next/link";
 import { compactUsd } from "@/lib/format";
 import type { DiscoveryRow, FreshRow, Payload } from "@/lib/read-discoveries";
+import { useT, translate } from "@/lib/i18n";
+import type { MessageKey } from "@/lib/messages/en";
+import { DEFAULT_LOCALE } from "@/lib/locale";
 
 /**
  * The token cards, lifted out of the console.
@@ -36,20 +39,26 @@ export { compactUsd };
  * one coin — so a per-card "unknown" thirty times over would read as thirty
  * broken coins instead of one degraded read.
  */
-export function chainGap(d: Payload): string {
+export function chainGap(
+  d: Payload,
+  t: (key: MessageKey, vars?: Record<string, string>) => string = (k, v) =>
+    translate(DEFAULT_LOCALE, k, v),
+): string {
   const c = d.chain;
   if (!c) return ""; // a payload from before this field existed
   const missing = [
-    !c.facts && "tickers",
-    !c.meta && "logos and links",
-    !c.clock && "ages",
+    !c.facts && t("common.gapTickers"),
+    !c.meta && t("common.gapMeta"),
+    !c.clock && t("common.gapClock"),
   ].filter(Boolean) as string[];
   if (!missing.length) return "";
   const list =
     missing.length === 1
-      ? missing[0]
-      : `${missing.slice(0, -1).join(", ")} and ${missing[missing.length - 1]}`;
-  return `The chain turned down this read, so ${list} are missing below. The trade counts are real. It retries on its own.`;
+      ? missing[0]!
+      : missing.length === 2
+        ? t("common.gapPair", { a: missing[0]!, b: missing[1]! })
+        : t("common.gapTrio", { a: missing[0]!, b: missing[1]!, c: missing[2]! });
+  return t("common.gapBody", { list });
 }
 
 /**
@@ -96,25 +105,27 @@ function CoinArt({ logo, symbol }: { logo: string; symbol: string }) {
  * would happen. So the curve case is checked FIRST.
  */
 function Reach({ onCurve }: { onCurve: boolean }) {
+  const t = useT();
   if (onCurve) {
     return (
       <span
         className="mm-badge out"
-        title="This coin still trades on its launch curve, so there is no pool to trade against. Adding it to a grant will not help until it graduates."
+        title={t("common.reachCurveTitle")}
       >
-        no pool yet
+        {t("common.reachNoPool")}
       </span>
     );
   }
   return (
-    <span className="mm-badge in" title="This coin trades in a pool an agent can route through.">
-      tradeable
+    <span className="mm-badge in" title={t("common.reachOkTitle")}>
+      {t("common.reachOk")}
     </span>
   );
 }
 
 /** Just launched: age, curve progress, who is trading it, what it claims to be. */
 export function FreshCard({ f }: { f: FreshRow }) {
+  const t = useT();
   const pct = f.progressBps === null ? null : f.progressBps / 100;
   return (
     <article className="mm-card">
@@ -129,11 +140,11 @@ export function FreshCard({ f }: { f: FreshRow }) {
             {f.name && f.name !== f.symbol && <span className="nm">{f.name}</span>}
           </div>
           <div className="meta mono">
-            <span>{shortAge(f.ageSec)} old</span>
+            <span>{t("common.freshAge", { ago: shortAge(f.ageSec) })}</span>
             {/* Distinct ADDRESSES first: 291 trades from 25 addresses is a
                 different thing from 223 from 176, and only one looks like people. */}
-            <span>{f.traders} traders</span>
-            <span>{f.trades} trades</span>
+            <span>{t("common.freshTraders", { n: f.traders })}</span>
+            <span>{t("common.freshTrades", { n: f.trades })}</span>
           </div>
         </div>
         <Reach onCurve={(f.progressBps ?? 0) < 10_000} />
@@ -144,7 +155,7 @@ export function FreshCard({ f }: { f: FreshRow }) {
           <div className="gbar">
             <i style={{ width: `${Math.min(100, Math.max(1.5, pct))}%` }} />
           </div>
-          <span className="glab mono">{pct < 0.05 ? "<0.1" : pct.toFixed(1)}% to graduation</span>
+          <span className="glab mono">{t("common.freshGrad", { pct: pct < 0.05 ? "<0.1" : pct.toFixed(1) })}</span>
         </div>
       )}
 
@@ -155,7 +166,7 @@ export function FreshCard({ f }: { f: FreshRow }) {
       {f.description ? (
         <p className="say">{f.description}</p>
       ) : f.bare ? (
-        <p className="say none">Published nothing about itself.</p>
+        <p className="say none">{t("common.freshBare")}</p>
       ) : null}
 
       <footer>
@@ -174,10 +185,10 @@ export function FreshCard({ f }: { f: FreshRow }) {
             Site
           </a>
         )}
-        {f.bare && <span className="soc mute">no socials</span>}
+        {f.bare && <span className="soc mute">{t("common.freshNoSocials")}</span>}
         {/* Prefetches only as far as the route's loading boundary. */}
         <Link className="soc go" href={`/t/${f.token}`}>
-          who&rsquo;s in it →
+          {t("common.cardGo")}
         </Link>
       </footer>
     </article>
@@ -186,6 +197,7 @@ export function FreshCard({ f }: { f: FreshRow }) {
 
 /** Trading now: the index's numbers, with the curve caveat kept visible. */
 export function MarketCard({ r }: { r: DiscoveryRow }) {
+  const t = useT();
   const up = (r.change24hPct ?? 0) >= 0;
   return (
     <article className="mm-card">
@@ -194,13 +206,13 @@ export function MarketCard({ r }: { r: DiscoveryRow }) {
         <div className="idc">
           <div className="tick">
             <b>{r.name}</b>
-            {r.graduated && <span className="mm-chip up">graduated</span>}
-            {r.onCurve && <span className="mm-chip quiet">on its curve</span>}
+            {r.graduated && <span className="mm-chip up">{t("common.mktGraduated")}</span>}
+            {r.onCurve && <span className="mm-chip quiet">{t("common.mktOnCurve")}</span>}
           </div>
           <div className="meta mono">
-            <span>{r.ageDays === null ? "—" : shortAge(Math.round(r.ageDays * 86_400))} old</span>
-            <span>{r.buyers24h === null ? "—" : `${r.buyers24h} buyers`}</span>
-            <span>{compactUsd(r.volume24hUsd)} vol</span>
+            <span>{t("common.freshAge", { ago: r.ageDays === null ? "—" : shortAge(Math.round(r.ageDays * 86_400)) })}</span>
+            <span>{r.buyers24h === null ? "—" : t("common.mktBuyers", { n: r.buyers24h })}</span>
+            <span>{t("common.mktVol", { vol: compactUsd(r.volume24hUsd) })}</span>
           </div>
         </div>
         <span className={`chg mono ${up ? "up" : "down"}`}>
@@ -210,7 +222,7 @@ export function MarketCard({ r }: { r: DiscoveryRow }) {
 
       <div className="mm-figs mono">
         <span>
-          <i>Price</i>
+          <i>{t("common.cellPrice")}</i>
           {r.priceUsd === null
             ? "—"
             : `$${r.priceUsd < 0.01 ? r.priceUsd.toPrecision(2) : r.priceUsd.toFixed(4)}`}
@@ -224,11 +236,11 @@ export function MarketCard({ r }: { r: DiscoveryRow }) {
           {compactUsd(r.fdvUsd)}
         </span>
         <span>
-          <i>Depth</i>
+          <i>{t("common.cellDepth")}</i>
           {/* A coin still on its bonding curve reports a reserve that is mostly
               the VIRTUAL SEED — about $4,100 it does not hold — so it is never
               shown here as though it were money you could sell into. */}
-          {r.onCurve ? "pre-graduation" : compactUsd(r.reserveUsd)}
+          {r.onCurve ? t("common.preGraduation") : compactUsd(r.reserveUsd)}
         </span>
       </div>
 
@@ -250,7 +262,7 @@ export function MarketCard({ r }: { r: DiscoveryRow }) {
         <span className="soc mute">{r.venue}</span>
         <Reach onCurve={r.onCurve} />
         <Link className="soc go" href={`/t/${r.token}`}>
-          who&rsquo;s in it →
+          {t("common.cardGo")}
         </Link>
       </footer>
     </article>

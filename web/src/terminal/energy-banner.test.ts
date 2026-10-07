@@ -30,6 +30,10 @@ import { energyRemedies, energyView, type EnergyRemedies, type EnergyView } from
 
 (globalThis as unknown as { React: typeof React }).React = React;
 
+import { EN } from "../lib/messages/en";
+
+const EN_TEXT = Object.values(EN).join("\n");
+
 const raw = (p: string) => readFileSync(new URL(p, import.meta.url), "utf8");
 /** Comments stripped — block, JSX and line — so prose about a rule never satisfies it. */
 const code = (src: string) =>
@@ -145,7 +149,11 @@ describe("what the panel may do", () => {
     // And setAsk is the draft setter, nothing else.
     assert.match(AGENT_CODE, /const setAsk = chat\.setDraft;/);
     // Inside the panel, the button calls exactly what it was handed.
-    assert.match(NOTE, /<button type="button" onClick=\{onAsk\}>\s*Ask me to get it\s*<\/button>/);
+    // i18n: its words live in the catalogue now; pin the key at the call site
+    // and the wording in EN.
+    assert.match(NOTE, /onClick=\{onAsk\}/);
+    assert.match(NOTE, /t\("common\.energyAskMe"\)/);
+    assert.match(EN_TEXT, /Ask me to get it/);
     assert.ok(!/fetch\(|\/api\/orders|placeOrder/.test(NOTE), "the panel itself reaches no route");
   });
 
@@ -267,7 +275,10 @@ describe("what the panel says", () => {
   it("and the Circle banner's own words hold to the same stance", () => {
     const banner = AGENT_CODE.slice(AGENT_CODE.indexOf("{circleLocked && ("), AGENT_CODE.indexOf("<EnergyNote"));
     assert.doesNotMatch(banner, /price|returns?\b|profit/i);
-    assert.match(banner, /00:00 UTC|between them/);
+    // i18n: the banner renders through the catalogue now; pin the key at the
+    // call site and the wording in EN.
+    assert.match(banner, /t\("agent\.circleBody"/);
+    assert.match(EN_TEXT, /between them/);
   });
 });
 

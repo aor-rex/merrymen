@@ -23,6 +23,9 @@ import { readdirSync, readFileSync, statSync } from "node:fs";
 import { join } from "node:path";
 import { describe, it } from "node:test";
 import { CIRCLE_TIERS } from "@merrymen/core";
+import { EN } from "../../../lib/messages/en";
+
+const EN_TEXT = Object.values(EN).join("\n");
 
 const ROUTE = readFileSync(new URL("./route.ts", import.meta.url), "utf8");
 
@@ -256,7 +259,10 @@ describe("the locked screen says how much is behind the lock", () => {
   const SCREEN = readFileSync(new URL("../../../terminal/screens/Alpha.tsx", import.meta.url), "utf8");
 
   it("RENDERS THE COUNTS THE ROUTE SENDS", () => {
-    assert.match(SCREEN, /\{wire\.picks\}<\/b> vetted · <b>\{wire\.passed\}<\/b> looked at and passed/);
+    // i18n: the counts render through the catalogue now; pin the key at the
+    // call site and the wording in EN.
+    assert.match(SCREEN, /rt\("alpha\.counts", \{ picks: wire\.picks, passed: wire\.passed \}\)/);
+    assert.match(EN_TEXT, /\{picks\} vetted · \{passed\} looked at and passed/);
   });
 
   it("and the price of entry, from the tier rather than typed", () => {

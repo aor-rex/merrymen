@@ -15,6 +15,7 @@ import { rejectRuleLabel } from "@merrymen/thesis";
 import { timeAgo } from "@/lib/time";
 import type { PublicThesis } from "@/lib/thesis";
 import { usd } from "@/lib/format";
+import { useT } from "@/lib/i18n";
 
 /**
  * YOUR agent. One tab in a social product, not a control room.
@@ -80,6 +81,7 @@ const money = (n: number) =>
   usd(n);
 
 export function YouClient() {
+  const t = useT();
   const [feed, setFeed] = useState<FeedResponse | null>(null);
   const [grants, setGrants] = useState<GrantsResponse | null>(null);
   const [mine, setMine] = useState<PublicThesis[]>([]);
@@ -142,7 +144,7 @@ export function YouClient() {
   if (loading) {
     return (
       <>
-        <PageHeader title="You" />
+        <PageHeader title={t("shell.navYou")} />
         <div className="mm-wrap">
           <div className="mm-skel">
             <i className="face" />
@@ -159,18 +161,16 @@ export function YouClient() {
   if (!hasAgent) {
     return (
       <>
-        <PageHeader title="You" />
+        <PageHeader title={t("shell.navYou")} />
         <div className="mm-wrap">
           <div className="mm-empty">
-            <h2>You don&rsquo;t have an agent yet</h2>
+            <h2>{t("common.youNoAgent")}</h2>
             <p>
-              {session?.address
-                ? "Your wallet is connected. The next step is signing the permissions your agent trades under — you decide the caps, and it cannot exceed them."
-                : "Agents here trade under permissions you sign, with caps you set. Nothing can be moved outside them."}
+              {session?.address ? t("common.youWalletReady") : t("common.youNoWallet")}
             </p>
             <p style={{ marginTop: 16 }}>
               <Link href="/grant" className="mm-btn primary">
-                Deploy an agent
+                {t("common.deployAgent")}
               </Link>
             </p>
           </div>
@@ -215,7 +215,7 @@ export function YouClient() {
 
   const positions = feed?.positions ?? [];
   const trades = (feed?.trades ?? []).slice(0, 7);
-  const name = feed?.agent?.name ?? "Your agent";
+  const name = feed?.agent?.name ?? t("common.youAgentName");
   const cash = grants?.balances?.cashUsdg ?? 0;
   const vault = grants?.balances?.vaultUsdg ?? 0;
   const positionsUsdg = positions.reduce((s, p) => s + Number(p.value_usdg ?? 0), 0);
@@ -283,7 +283,7 @@ export function YouClient() {
             been configured. */}
         {rail.length > 0 && (
           <section className="mm-notices" aria-label="Warnings from the trading rail">
-            <h2 className="mm-kicker">What the rail is saying</h2>
+            <h2 className="mm-kicker">{t("common.youRail")}</h2>
             <ul>
               {rail.map((e) => (
                 <li key={e.message}>
@@ -299,7 +299,7 @@ export function YouClient() {
           <div className="mm-hero-top">
             <AgentAvatar name={name} slug={feed?.agent?.slug ?? null} size={44} />
             <div>
-              <p className="mm-kicker">everything it holds</p>
+              <p className="mm-kicker">{t("common.youHolds")}</p>
               <p className="big mono">{money(latest || cash + vault + positionsUsdg)}</p>
             </div>
             <div className="mm-hero-pnl">
@@ -307,15 +307,14 @@ export function YouClient() {
                 // The REASON, not a guess at one. This said "no deposit on
                 // record" for every refusal, including the ones where a deposit
                 // is plainly on record and simply cannot be evidenced.
-                <span className="mono flat">{rank.unrankedWhy ? unrankedLabel(rank.unrankedWhy) : "unranked"}</span>
+                <span className="mono flat">{rank.unrankedWhy ? unrankedLabel(rank.unrankedWhy) : t("common.youUnranked")}</span>
               ) : (
                 <span className={`mono ${tone}`}>
-                  {pnlPct > 0 ? "+" : ""}
-                  {pnlPct.toFixed(1)}% all time
+                  {t("common.youAllTime", { pct: `${pnlPct > 0 ? "+" : ""}${pnlPct.toFixed(1)}` })}
                   {/* GROSS OR NET, said rather than implied. On a small book the
                       difference is most of the number: the canary's four fills
                       read -0.13 gross and -6.65 net. */}
-                  {(feed?.gasUnpricedTrades ?? 0) > 0 ? ", gross of some gas" : ""}
+                  {(feed?.gasUnpricedTrades ?? 0) > 0 ? t("common.youGrossGas") : ""}
                 </span>
               )}
             </div>
@@ -324,17 +323,17 @@ export function YouClient() {
             <Sparkline points={curve.slice(-60)} width={640} height={64} tone={tone} />
           )}
           <dl className="mm-slices">
-            <Slice label="cash" value={money(cash)} />
-            <Slice label="vault" value={money(vault)} />
-            <Slice label="positions" value={money(positionsUsdg)} />
+            <Slice label={t("common.cash")} value={money(cash)} />
+            <Slice label={t("common.vault")} value={money(vault)} />
+            <Slice label={t("common.positions")} value={money(positionsUsdg)} />
           </dl>
         </section>
 
         <section className="mm-you-cols">
           <div>
-            <h2 className="mm-kicker">Lately</h2>
+            <h2 className="mm-kicker">{t("common.youLately")}</h2>
             {trades.length === 0 ? (
-              <p className="mm-note">Nothing yet.</p>
+              <p className="mm-note">{t("common.youNothingYet")}</p>
             ) : (
               <ul className="mm-tape">
                 {trades.map((t, i) => (
@@ -349,9 +348,9 @@ export function YouClient() {
             )}
           </div>
           <div>
-            <h2 className="mm-kicker">Holding</h2>
+            <h2 className="mm-kicker">{t("common.youHolding")}</h2>
             {positions.length === 0 ? (
-              <p className="mm-note">Nothing right now.</p>
+              <p className="mm-note">{t("common.youNothingNow")}</p>
             ) : (
               <ul className="mm-tape">
                 {positions.map((p) => (
@@ -364,8 +363,8 @@ export function YouClient() {
                         price nobody has refreshed is not something the wall
                         did. The token page already chips this case quietly. */}
                     {p.price_stale ? (
-                      <span className="mm-chip quiet" title="This mark has not been refreshed recently">
-                        stale
+                      <span className="mm-chip quiet" title={t("common.staleMarkTitle")}>
+                        {t("common.stale")}
                       </span>
                     ) : (
                       <span />
@@ -380,7 +379,7 @@ export function YouClient() {
 
         {mine.length > 0 && (
           <section className="mm-agent-feed">
-            <h2 className="mm-kicker">What it said in public</h2>
+            <h2 className="mm-kicker">{t("common.youSaid")}</h2>
             <div className="mm-feed">
               {mine.map((t, i) => (
                 <ThesisCard key={`${t.at}:${i}`} t={t} hideAgent />
@@ -390,16 +389,16 @@ export function YouClient() {
         )}
 
         <section className="mm-money">
-          <h2 className="mm-kicker">Money &amp; control</h2>
+          <h2 className="mm-kicker">{t("common.youMoney")}</h2>
           <p className="mm-note">
-            The wallet, the caps, withdrawal and the kill switch all live where the keys do.
+            {t("common.youMoneyBody")}
           </p>
           <p style={{ marginTop: 12, display: "flex", gap: 8, flexWrap: "wrap" }}>
             <Link href="/grant" className="mm-btn">
-              Wallet &amp; permissions
+              {t("common.youWalletBtn")}
             </Link>
             <Link href="/settings" className="mm-btn">
-              Settings
+              {t("shell.settings")}
             </Link>
           </p>
           {/* THE KILL SWITCH SURVIVES THE REDESIGN. It lived on /home, which is

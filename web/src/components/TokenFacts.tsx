@@ -1,7 +1,10 @@
+"use client";
+
 import { GECKO_WINDOWS } from "../../../worker/src/venues/geckoterminal";
 import { compactUsd, coinPrice, count, pct, usd } from "@/lib/format";
 import { timeAgo } from "@/lib/time";
 import type { TokenMarket } from "@/lib/read-token-market";
+import { useT } from "@/lib/i18n";
 
 /**
  * WHAT THE MARKET SAYS, above what the agents said.
@@ -31,14 +34,14 @@ function Cell({ label, children }: { label: string; children: React.ReactNode })
 }
 
 export function StatStrip({ market }: { market: TokenMarket }) {
+  const t = useT();
   // Unreadable is checked BEFORE absent — the order the launchpad panel is
   // already pinned to. Four dashes in a monospace grid read as four zeros, so a
   // refused read gets a sentence rather than a strip.
   if (market.read === "unread") {
     return (
       <div className="mm-readfail">
-        The index turned down this read, so there are no market figures below. It retries on its
-        own.
+        {t("common.factsUnreadBody")}
       </div>
     );
   }
@@ -49,8 +52,7 @@ export function StatStrip({ market }: { market: TokenMarket }) {
         {/* About the FEEDS, never about the index. What we hold is page one of
             three of them — roughly the top of the chain, not everything the
             index knows — so &quot;not indexed&quot; is a claim we cannot make. */}
-        No pool for this token is in the index&rsquo;s trending, new or top lists right now, so it
-        publishes no figures for it.
+        {t("common.factsAbsentBody")}
       </p>
     );
   }
@@ -61,14 +63,14 @@ export function StatStrip({ market }: { market: TokenMarket }) {
   if (coin) {
     return (
       <dl className="mm-tok-strip">
-        <Cell label="Price">{coinPrice(coin.priceUsd)}</Cell>
+        <Cell label={t("common.cellPrice")}>{coinPrice(coin.priceUsd)}</Cell>
         <Cell label="FDV">{compactUsd(coin.fdvUsd)}</Cell>
-        <Cell label="24h vol">{compactUsd(coin.buckets.h24.volumeUsd)}</Cell>
-        <Cell label="Depth">
+        <Cell label={t("common.cellVol")}>{compactUsd(coin.buckets.h24.volumeUsd)}</Cell>
+        <Cell label={t("common.cellDepth")}>
           {/* A coin on its bonding curve reports a reserve that is mostly the
               VIRTUAL SEED — about $4,100 it does not hold — so it is never
               shown here as money you could sell into. */}
-          {coin.onCurve ? <span className="soft">pre-graduation</span> : compactUsd(coin.reserveUsd)}
+          {coin.onCurve ? <span className="soft">{t("common.preGraduation")}</span> : compactUsd(coin.reserveUsd)}
         </Cell>
       </dl>
     );
@@ -87,40 +89,40 @@ export function StatStrip({ market }: { market: TokenMarket }) {
           chain refused the read, and a halt is the last thing to guess at. */}
       {(stock.paused === true || acting) && (
         <div className="mm-tok-flags">
-          {stock.paused === true && <span className="mm-chip warn">halted</span>}
+          {stock.paused === true && <span className="mm-chip warn">{t("common.halted")}</span>}
           {acting && (
             <span
               className="mm-chip quiet"
-              title="A split or similar is pending, so on-chain balances are scaled."
+              title={t("common.corpActionTitle")}
             >
-              corporate action
+              {t("common.corpAction")}
             </span>
           )}
         </div>
       )}
       <dl className="mm-tok-strip">
-        <Cell label="Price">
+        <Cell label={t("common.cellPrice")}>
           {/* A token with no Chainlink feed has no price BY CONSTRUCTION. That
               is a fact about the token rather than an outage, and it must not
               render as the same dash a failed multicall leg produces. */}
-          {noFeed ? <span className="soft">no feed</span> : usd(stock.priceUsd)}
+          {noFeed ? <span className="soft">{t("common.noFeed")}</span> : usd(stock.priceUsd)}
         </Cell>
-        <Cell label="Feed">
+        <Cell label={t("common.cellFeed")}>
           {stock.priceUpdatedAt === null ? (
             "—"
           ) : (
             <>
               {timeAgo(stock.priceUpdatedAt)}
               {stale && (
-                <span className="mm-chip quiet" title="This feed has not updated in over an hour">
-                  stale
+                <span className="mm-chip quiet" title={t("common.staleTitle")}>
+                  {t("common.stale")}
                 </span>
               )}
             </>
           )}
         </Cell>
-        <Cell label="24h vol">{compactUsd(stock.volume24hUsd)}</Cell>
-        <Cell label="Holders">{count(stock.holders)}</Cell>
+        <Cell label={t("common.cellVol")}>{compactUsd(stock.volume24hUsd)}</Cell>
+        <Cell label={t("common.cellHolders")}>{count(stock.holders)}</Cell>
       </dl>
     </>
   );
@@ -219,6 +221,7 @@ function Bar({
  * approximated, so nobody goes looking for it again.
  */
 export function FlowBars({ market }: { market: TokenMarket }) {
+  const t = useT();
   const coin = market.read === "found" ? market.coin : null;
   if (!coin) return null;
   const d = coin.buckets.h24;
@@ -226,8 +229,8 @@ export function FlowBars({ market }: { market: TokenMarket }) {
 
   return (
     <div className="mm-tok-flowbars">
-      <Bar label="Trades" lo={d.buys} hi={d.sells} loWord="buys" hiWord="sells" />
-      <Bar label="Traders" lo={d.buyers} hi={d.sellers} loWord="buyers" hiWord="sellers" />
+      <Bar label={t("common.flowTrades")} lo={d.buys} hi={d.sells} loWord={t("common.flowBuys")} hiWord={t("common.flowSells")} />
+      <Bar label={t("common.flowTraders")} lo={d.buyers} hi={d.sellers} loWord={t("common.flowBuyers")} hiWord={t("common.flowSellers")} />
     </div>
   );
 }
@@ -246,11 +249,12 @@ const THIN = 50;
  * count is null this does not render at all: "we could not count" is not "few".
  */
 export function RiskCallout({ market }: { market: TokenMarket }) {
+  const t = useT();
   const n = market.read === "found" ? (market.stock?.holders ?? null) : null;
   if (n === null || n >= THIN) return null;
   return (
     <p className="mm-tok-risk">
-      {count(n)} addresses hold this token on chain. A thin holder base moves on small size.
+      {t("common.riskThin", { n: count(n) })}
     </p>
   );
 }

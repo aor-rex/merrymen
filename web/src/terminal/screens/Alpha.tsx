@@ -4,6 +4,7 @@ import { compactUsd, coinPrice } from "../live";
 import { Empty } from "../ui";
 import type { AlphaExtras, DiscoveryRow } from "@/lib/read-discoveries";
 import { count } from "@/lib/format";
+import { useT, useRichT } from "@/lib/i18n";
 
 /**
  * ALPHA — what the scout looked at, and what it threw out.
@@ -49,6 +50,7 @@ type Wire =
 type State = { kind: "loading" } | { kind: "failed"; why: string } | { kind: "ok"; wire: Wire };
 
 export function Alpha({ onToken }: { onToken: (id: string) => void }) {
+  const t = useT();
   const [state, setState] = useState<State>({ kind: "loading" });
   const [revision, setRevision] = useState(0);
 
@@ -82,14 +84,14 @@ export function Alpha({ onToken }: { onToken: (id: string) => void }) {
           </span>
         )}
       </header>
-      <p className="alpha-intro">The research behind the trade.</p>
+      <p className="alpha-intro">{t("alpha.intro")}</p>
 
-      {state.kind === "loading" && <p role="status" className="hosted-note">Loading Alpha…</p>}
+      {state.kind === "loading" && <p role="status" className="hosted-note">{t("alpha.loading")}</p>}
 
       {state.kind === "failed" && (
         <Empty
-          title="Alpha is unavailable."
-          action={{label:"Try again",onClick:()=>setRevision(value=>value+1)}}
+          title={t("alpha.unavailable")}
+          action={{label:t("alpha.retry"),onClick:()=>setRevision(value=>value+1)}}
         />
       )}
 
@@ -108,17 +110,19 @@ export function Alpha({ onToken }: { onToken: (id: string) => void }) {
  * "hold some" and "we could not check" have three different next steps.
  */
 function Locked({ wire, onRefresh }: { wire: Extract<Wire, { locked: true }>; onRefresh:()=>void }) {
+  const t = useT();
+  const rt = useRichT();
   return <>
     <section className="alpha-gate">
-      <LockKeyhole size={32}/><h2>An edge for holders.</h2>
+      <LockKeyhole size={32}/><h2>{t("alpha.holdersEdge")}</h2>
       {/* WHAT THE ROUTE COUNTS, said as it counts it: the owner's wallet and
           their agent's own account together (lib/merrymen-standing.ts). */}
-      <p>Hold {wire.token.symbol} between your wallet and your agent&apos;s account to unlock Alpha.</p>
+      <p>{t("alpha.unlock", { symbol: wire.token.symbol })}</p>
       <div className="alpha-threshold"><strong>{count(wire.need.tokens)}</strong><span>{wire.token.symbol}</span></div>
-      {wire.why === "unreachable" && <p role="status">Could not verify your holdings. Try again.</p>}
-      {wire.why === "sign-in" ? <a className="flow-primary" href="/profile">Sign in with wallet</a> : <button className="flow-primary" onClick={onRefresh}>Verify wallet holdings</button>}
+      {wire.why === "unreachable" && <p role="status">{t("alpha.holdingsUnverified")}</p>}
+      {wire.why === "sign-in" ? <a className="flow-primary" href="/profile">{t("alpha.signIn")}</a> : <button className="flow-primary" onClick={onRefresh}>{t("alpha.verify")}</button>}
     </section>
-    <section className="alpha-inside"><h2>Inside Alpha</h2>
+    <section className="alpha-inside"><h2>{t("alpha.inside")}</h2>
       {/* HOW MUCH IS BEHIND THE LOCK, in live numbers rather than a promise.
           The route sends these counts precisely so a locked reader can weigh
           the ask — its own comment calls them "the honest advertisement: they
@@ -128,13 +132,14 @@ function Locked({ wire, onRefresh }: { wire: Extract<Wire, { locked: true }>; on
           ranked something: 0 vetted would advertise an empty desk, and the
           truthful thing to show then is nothing. */}
       {wire.picks + wire.passed > 0 && (
-        <p className="alpha-counts"><b>{wire.picks}</b> vetted · <b>{wire.passed}</b> looked at and passed</p>
+        <p className="alpha-counts">{rt("alpha.counts", { picks: wire.picks, passed: wire.passed })}</p>
       )}
-      <ul><li><Activity size={22} aria-hidden="true"/><span>Tokens our agents researched</span></li><li><FileText size={22} aria-hidden="true"/><span>Short takes with the reasoning attached</span></li><li><ExternalLink size={22} aria-hidden="true"/><span>What our agents kept—and passed on</span></li></ul></section>
+      <ul><li><Activity size={22} aria-hidden="true"/><span>{t("alpha.researched")}</span></li><li><FileText size={22} aria-hidden="true"/><span>{t("alpha.shortTakes")}</span></li><li><ExternalLink size={22} aria-hidden="true"/><span>{t("alpha.keptPassed")}</span></li></ul></section>
   </>;
 }
 
 function Desk({ wire, onToken }: { wire: Extract<Wire, { locked: false }>; onToken: (id: string) => void }) {
+  const t = useT();
   return (
     <>
       {/* SAID ONCE FOR THE PAGE, NOT PER COIN. These fail as a wave — the index
@@ -142,38 +147,38 @@ function Desk({ wire, onToken }: { wire: Extract<Wire, { locked: false }>; onTok
           as thirty broken coins instead of one degraded read. */}
       {wire.indexUnreachable && (
         <p className="hosted-note" role="status">
-          Market data is unavailable. Try again shortly.
+          {t("alpha.marketDown")}
         </p>
       )}
       {wire.truncated && !wire.indexUnreachable && (
         <p className="hosted-note" role="status">
-          Some market data is unavailable.
+          {t("alpha.marketPartial")}
         </p>
       )}
       {!wire.researched && (
         <p className="hosted-note" role="status">
-          Website research is unavailable for this update.
+          {t("alpha.noResearch")}
         </p>
       )}
 
       <section className="strip">
         <h3>
-          Kept <span>{wire.picks.length}</span>
+          {t("alpha.kept")} <span>{wire.picks.length}</span>
         </h3>
         {wire.picks.length === 0 ? (
           wire.verdictsWhy ? (
             // The distinction the whole read is built on: it could not look.
             <Empty
-              title="Nothing has been vetted."
+              title={t("alpha.nothingVetted")}
               note={
                 wire.verdictsWhy === "no-model"
-                  ? "Research has not run yet."
-                  : "Research is unavailable."
+                  ? t("alpha.notRun")
+                  : t("alpha.researchDown")
               }
             />
           ) : (
             <Empty
-              title="No picks this time."
+              title={t("alpha.noPicks")}
             />
           )
         ) : (
@@ -188,7 +193,7 @@ function Desk({ wire, onToken }: { wire: Extract<Wire, { locked: false }>; onTok
       {wire.passed.length > 0 && (
         <details className="alpha-passed">
           <summary>
-            Looked at and passed <span className="mono">{wire.passed.length}</span>
+            {t("alpha.passed")} <span className="mono">{wire.passed.length}</span>
           </summary>
           <ol className="alpha-list">
             {wire.passed.map((r) => (
@@ -202,6 +207,7 @@ function Desk({ wire, onToken }: { wire: Extract<Wire, { locked: false }>; onTok
 }
 
 function Row({ r, onToken, passed = false }: { r: Item; onToken: (id: string) => void; passed?: boolean }) {
+  const t = useT();
   const up = (r.change24hPct ?? 0) >= 0;
   return (
     <li className={`alpha-row${passed ? " out" : ""}`}>
@@ -212,8 +218,8 @@ function Row({ r, onToken, passed = false }: { r: Item; onToken: (id: string) =>
               launch curve has no pool at all, so "add it to a grant" is advice
               that does not work — the owner would pay for a re-sign and still
               not be able to touch it. */}
-          {r.onCurve && <span className="alpha-chip">on its curve</span>}
-          {r.graduated && <span className="alpha-chip up">graduated</span>}
+          {r.onCurve && <span className="alpha-chip">{t("alpha.onCurve")}</span>}
+          {r.graduated && <span className="alpha-chip up">{t("alpha.graduated")}</span>}
         </span>
         <span className={`alpha-chg mono ${up ? "up" : "down"}`}>
           {r.change24hPct === null ? "—" : `${up ? "+" : ""}${r.change24hPct.toFixed(1)}%`}
@@ -272,15 +278,16 @@ function Row({ r, onToken, passed = false }: { r: Item; onToken: (id: string) =>
  * accusation.
  */
 function ResearchLine({ f }: { f: Research }) {
+  const t = useT();
   const parts: string[] = [];
-  if (f.publishedNothing === true) parts.push("published nothing");
-  if (f.siteReachable === false) parts.push("site down");
+  if (f.publishedNothing === true) parts.push(t("alpha.researchNone"));
+  if (f.siteReachable === false) parts.push(t("alpha.siteDown"));
   if (f.siteReachable === true) {
-    parts.push("site up");
-    if (f.siteNamesContract === true) parts.push("names the contract");
-    if (f.siteNamesContract === false) parts.push("never names the contract");
-    if (f.siteHypeWords !== null) parts.push(`${f.siteHypeWords} hype words`);
-    if (f.siteOutboundDomains !== null) parts.push(`${f.siteOutboundDomains} outbound`);
+    parts.push(t("alpha.siteUp"));
+    if (f.siteNamesContract === true) parts.push(t("alpha.namesContract"));
+    if (f.siteNamesContract === false) parts.push(t("alpha.noContract"));
+    if (f.siteHypeWords !== null) parts.push(t("alpha.hypeWords", { count: f.siteHypeWords }));
+    if (f.siteOutboundDomains !== null) parts.push(t("alpha.outbound", { count: f.siteOutboundDomains }));
   }
   if (!parts.length) return null;
   return <p className="alpha-research mono">{parts.join(" · ")}</p>;

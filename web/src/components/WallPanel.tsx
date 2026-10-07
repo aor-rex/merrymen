@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
+import { useT, useRichT } from "@/lib/i18n";
 import type { WallInfo } from "@/app/api/wall/route";
 import type { WallCase } from "@merrymen/wall-battery";
 
@@ -11,6 +12,8 @@ import type { WallCase } from "@merrymen/wall-battery";
  * and shows each one bouncing. Hidden until a grant exists.
  */
 export function WallPanel() {
+  const t = useT();
+  const rt = useRichT();
   const [info, setInfo] = useState<WallInfo | null>(null);
   const [cases, setCases] = useState<WallCase[] | null>(null);
   const [proving, setProving] = useState(false);
@@ -52,12 +55,13 @@ export function WallPanel() {
 
   return (
     <div className="panel wall-panel">
-      <div className="section-title">the wall</div>
+      <div className="section-title">{t("common.wallTitle")}</div>
       <p className="wall-sub">
-        Don&apos;t trust us — verify it. Every address below is the chain&apos;s record on{" "}
-        <b>{info.chainName}</b> ({info.chainId}), not ours. The chips marked{" "}
-        <b>on-chain</b> are enforced by your account contract; the rest are counters merrymen
-        keeps on this machine.
+        {rt("common.wallSub", {
+          chain: info.chainName ?? "",
+          id: String(info.chainId),
+          onchain: t("common.wallOnchain"),
+        })}
       </p>
 
       {/*
@@ -72,27 +76,27 @@ export function WallPanel() {
         numbers — which is what this row is for.
       */}
       <div className="wall-caps mono">
-        <span className="cap">max <b>{info.caps.perTradeUsdg} USDG</b>/trade <i>on-chain</i></span>
-        <span className="cap">key dies in <b>{daysLeft}d</b> <i>on-chain</i></span>
-        <span className="cap"><b>{info.caps.dailyUsdg} USDG</b>/day <i>software</i></span>
-        <span className="cap"><b>{info.caps.maxOpsPerDay}</b> ops/day <i>software</i></span>
-        <span className="cap">breaker <b>{info.caps.maxDrawdownPct}%</b> <i>software</i></span>
+        <span className="cap"><b>{t("common.wallPerTrade", { caps: String(info.caps.perTradeUsdg) })}</b> <i>{t("common.wallMarkOnchain")}</i></span>
+        <span className="cap"><b>{t("common.wallKeyDies", { days: daysLeft })}</b> <i>{t("common.wallMarkOnchain")}</i></span>
+        <span className="cap"><b>{t("common.wallPerDay", { caps: String(info.caps.dailyUsdg) })}</b> <i>{t("common.wallMarkSoft")}</i></span>
+        <span className="cap"><b>{t("common.wallOps", { n: info.caps.maxOpsPerDay })}</b> <i>{t("common.wallMarkSoft")}</i></span>
+        <span className="cap"><b>{t("common.wallBreaker", { n: info.caps.maxDrawdownPct })}</b> <i>{t("common.wallMarkSoft")}</i></span>
       </div>
 
       <div className="wall-addrs mono">
         <a href={link(info.addresses.smartAccount)} target="_blank" rel="noreferrer">
-          account {addr(info.addresses.smartAccount)} ↗
+          {t("common.wallAccount", { addr: addr(info.addresses.smartAccount) })}
         </a>
         <a href={link(info.addresses.sessionKey)} target="_blank" rel="noreferrer">
-          session key {addr(info.addresses.sessionKey)} ↗
+          {t("common.wallSession", { addr: addr(info.addresses.sessionKey) })}
         </a>
         <a href={link(info.addresses.owner)} target="_blank" rel="noreferrer">
-          owner {addr(info.addresses.owner)} ↗
+          {t("common.wallOwner", { addr: addr(info.addresses.owner) })}
         </a>
       </div>
 
       <button className="wall-prove" onClick={() => void prove()} disabled={proving}>
-        {proving ? "loosing arrows at the wall…" : cases ? "prove it again" : "🛡 prove the wall"}
+        {proving ? t("common.wallProving") : cases ? t("common.wallProveAgain") : t("common.wallProve")}
       </button>
 
       {cases && (
@@ -100,19 +104,13 @@ export function WallPanel() {
           {cases.map((c) => (
             <div key={c.attempt} className={`wall-case ${c.held ? "held" : "breach"}`}>
               <span className={`wall-verdict mono ${c.ok ? "ok" : "no"}`}>
-                {c.held ? (c.ok ? "✓ approved" : `✗ ${c.rule}`) : "⚠ BREACH"}
+                {c.held ? (c.ok ? t("common.wallApproved") : `✗ ${c.rule}`) : t("common.wallBreach")}
               </span>
               <span className="wall-attempt">{c.attempt}</span>
             </div>
           ))}
           <p className="wall-note">
-            Each attempt just ran through <code>worker/src/policy.ts</code> — the same deterministic
-            policy the worker applies to every intent, using your grant&apos;s real caps. So this
-            shows the software agreeing with itself, which is worth something and is not the same
-            as a chain-side proof: the attacker it exists for is the one who skips this code
-            entirely. What the account contract would refuse independently is the per-trade size,
-            the asset and contract allowlists, any attempt to move native ETH, and anything at all
-            after the key expires.
+            {t("common.wallNote")}
           </p>
         </div>
       )}

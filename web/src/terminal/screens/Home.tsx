@@ -18,6 +18,7 @@ import {
 import { Coin, Face, MovingFigure, NameBlock, Pill } from "../ui";
 import { AgentStrip } from "../AgentStrip";
 import { usd, usdParts } from "@/lib/format";
+import { useT } from "@/lib/i18n";
 
 export function Home({
   tokens,
@@ -71,6 +72,7 @@ export function Home({
   // it is also not evidence that anybody bought anything, so an unread row does
   // not get to sit at the top of "most bought".
   const [showAll, setShowAll] = useState(false);
+  const t = useT();
   // The phone's way into the group chat. Hidden only on an install that said
   // it has no room (self-hosted answers 404), never merely while unknown.
   const room = useGroupChatSupported();
@@ -134,7 +136,7 @@ export function Home({
   return (
     <div className="home-page">
       <header className="top home-overview">
-        <div className="home-heading"><h1 className="top-title">Home</h1>{room && onGroupChat && <button type="button" className="icon-btn" aria-label="Group chat" title="Group chat" onClick={onGroupChat}><MessagesSquare size={22} strokeWidth={1.8} aria-hidden="true"/></button>}</div>
+        <div className="home-heading"><h1 className="top-title">{t("home.title")}</h1>{room && onGroupChat && <button type="button" className="icon-btn" aria-label="Group chat" title="Group chat" onClick={onGroupChat}><MessagesSquare size={22} strokeWidth={1.8} aria-hidden="true"/></button>}</div>
 
         {mine ? (
           <button type="button" className="hero" onClick={onDesk}>
@@ -142,7 +144,7 @@ export function Home({
               <Face name={mine.name} slug={mine.slug} />
               <NameBlock title={mine.name} owner={mine.owner ?? "you"} />
             </div>
-            <span className="home-balance-label">Portfolio balance</span>
+            <span className="home-balance-label">{t("home.portfolioBalance")}</span>
               <div className="balance">
                 {lead}
                 {fraction !== null && <sup>{fraction}</sup>}
@@ -154,16 +156,16 @@ export function Home({
                     it reads as a minus in the monospace column. The figure and
                     its symbol are the locale's. */}
                 {chg < 0 ? "−" : "+"}
-                {usd(Math.abs(chg))} today
+                {t("home.changeToday", { value: `${usd(Math.abs(chg))}` })}
               </p>
             )}
           </button>
         ) : (
           <div className="hero empty">
-            <h2>This one trades.</h2>
+            <h2>{t("home.emptyTitle")}</h2>
           </div>
         )}
-        <button type="button" className="home-deposit" onClick={onDeposit}>{mine ? "Deposit" : "Set up your agent"}<span aria-hidden="true">↗</span></button>
+        <button type="button" className="home-deposit" onClick={onDeposit}>{mine ? t("home.deposit") : t("home.setupAgent")}<span aria-hidden="true">↗</span></button>
         {mine && (
           <PerformanceChart
             balance values={mine.history ?? []}
@@ -211,24 +213,24 @@ export function Home({
       />
 
       <section className="home-markets">
-        <div className="home-market-heading"><h2 className="week-label">Market activity</h2><button type="button" className="icon-btn" aria-label="Search tokens or agents" onClick={onSearch}><Search size={22}/></button></div>
+        <div className="home-market-heading"><h2 className="week-label">{t("home.marketActivity")}</h2><button type="button" className="icon-btn" aria-label="Search tokens or agents" onClick={onSearch}><Search size={22}/></button></div>
         <div className="pills">
           <Pill on={tokenTab === "buys"} onClick={() => {setShowAll(false);onTokenTab("buys");}}>
-            Buying
+            {t("home.buying")}
           </Pill>
           <Pill on={tokenTab === "held"} onClick={() => {setShowAll(false);onTokenTab("held");}}>
-            Held
+            {t("home.held")}
           </Pill>
         </div>
         <div className="desktop-home-table-wrap">
           <table className="desktop-home-table">
             <thead>
               <tr>
-                <th>Token</th>
-                <th>{tokenTab === "buys" ? "Agents buying" : "Held by"}</th>
-                <th>Agents</th>
-                <th>Price</th>
-                <th>Session change</th>
+                <th>{t("home.colToken")}</th>
+                <th>{tokenTab === "buys" ? t("home.colAgentsBuying") : t("home.colHeldBy")}</th>
+                <th>{t("home.colAgents")}</th>
+                <th>{t("home.colPrice")}</th>
+                <th>{t("home.colSessionChange")}</th>
               </tr>
             </thead>
             <tbody>
@@ -318,7 +320,7 @@ export function Home({
             );
           })}
         </div>
-        {shown.length > 8 && <button className="home-show-more" onClick={()=>setShowAll(value=>!value)}>{showAll ? "Show fewer tokens" : `Show all ${shown.length} tokens`}</button>}
+        {shown.length > 8 && <button className="home-show-more" onClick={()=>setShowAll(value=>!value)}>{showAll ? t("home.showFewerTokens") : t("home.showAllTokens", { count: shown.length })}</button>}
       </section>
     </div>
   );

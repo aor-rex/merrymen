@@ -3,6 +3,7 @@
 import { useEffect, useRef, useState } from "react";
 import type { Candle } from "@/lib/read-candles";
 import { usdFixed, subCentUsd } from "@/lib/format";
+import { useT } from "@/lib/i18n";
 
 /**
  * THE PRICE CHART, drawn by TradingView's lightweight-charts.
@@ -82,6 +83,7 @@ export function CandleChart({
 }) {
   const box = useRef<HTMLDivElement | null>(null);
   const [failed, setFailed] = useState(false);
+  const t = useT();
 
   useEffect(() => {
     const el = box.current;
@@ -187,7 +189,7 @@ export function CandleChart({
   }, [candles, interval, height]);
 
   if (failed) {
-    return <p className="mm-note">The chart could not be drawn. The figures above still stand.</p>;
+    return <p className="mm-note">{t("common.candlesFailed")}</p>;
   }
 
   // The height is reserved before anything paints, so the reasoning below never

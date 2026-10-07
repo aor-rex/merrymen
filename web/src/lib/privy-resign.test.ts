@@ -20,6 +20,9 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { describe, it } from "node:test";
+import { EN } from "./messages/en";
+
+const EN_TEXT = Object.values(EN).join("\n");
 
 const codeOf = (src: string) =>
   src
@@ -129,16 +132,20 @@ describe("what a Privy owner is told when they cannot re-sign", () => {
     // The old panel told the entire Privy cohort to paste a key that does not
     // exist for their account: advice that cannot be followed, which is the
     // failure this codebase keeps refusing.
-    assert.match(WALLET, /there is no key to paste, which\s+is the point of it/);
-    assert.match(WALLET, /sign in as that account and this control comes back/);
+    // i18n: the sentence lives in the catalogue now; pin the key at the call
+    // site and the wording in EN.
+    assert.match(WALLET, /t\("wallet\.privyResign"/);
+    assert.match(EN_TEXT, /there is no key to paste, which\s+is the point of it/);
+    assert.match(EN_TEXT, /sign in as that account and this control comes back/);
   });
 
   it("and the two remedies are behind isPrivyOwned, not behind a missing key", () => {
     // A missing key means two different things — session.ts:104-120 says so at
     // length — and the binding version is the durable signal.
-    const at = WALLET.indexOf("Re-signing {short(grant.smartAccount)} needs the login");
+    const at = WALLET.indexOf('t("wallet.privyResign"');
     assert.ok(at > 0, "the Privy sentence must exist");
     assert.ok(WALLET.lastIndexOf("isPrivyOwned(grant) ?", at) > 0, "chosen by the binding version");
+    assert.match(EN_TEXT, /Re-signing .* needs the login/, "the Privy sentence wording survives in EN");
   });
 
   it("the expiry and uncovered warnings reach Privy owners too", () => {

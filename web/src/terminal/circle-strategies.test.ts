@@ -64,10 +64,12 @@ describe("the picker marks what the worker gates", () => {
 
   it("AND THE MARK SAYS WHAT HAPPENS IF YOU PICK IT ANYWAY", () => {
     // A badge alone is a label. The sentence is what stops somebody funding an
-    // agent that will not trade.
+    // agent that will not trade. It renders through the catalogue now, like
+    // Settings — the key on one side, the sentence in EN on the other.
     const src = read("./screens/CreateAgent.tsx");
-    assert.match(src, /Runs only while you hold \$MERRYMEN/);
-    assert.match(src, /opens nothing new until you do/);
+    assert.match(src, /onboard\.circleSuffix/);
+    assert.match(EN["onboard.circleSuffix" as MessageKey] as string, /Runs only while you hold \$MERRYMEN/);
+    assert.match(EN["onboard.circleSuffix" as MessageKey] as string, /opens nothing new until you do/);
   });
 
   it("and the gate itself is still where the test thinks it is", () => {
@@ -202,20 +204,26 @@ describe("the Circle gate is satisfiable, and the warning is visible", () => {
     // unread balance is never defaulted to a zero.
     const agent = readFileSync(new URL("./screens/Agent.tsx", import.meta.url), "utf8");
     assert.doesNotMatch(agent, /Adding funds won't change it/);
-    assert.match(agent, /between them/);
-    // Inside a template literal, so it is a plain apostrophe rather than the
-    // JSX entity the surrounding markup uses.
-    assert.match(agent, /ask me to get my \$MERRYMEN/);
+    // The banner renders through the catalogue now: the keys are pinned here
+    // and the sentences in EN.
+    assert.match(agent, /t\("agent\.circleBody"/);
+    assert.match(EN["agent.circleBody" as MessageKey] as string, /between them/);
+    assert.match(agent, /t\("agent\.sendExtra"\)/);
+    assert.match(EN["agent.sendExtra" as MessageKey] as string, /ask me to get my \$MERRYMEN/);
     assert.doesNotMatch(agent, /tokens \?\? 0/, "an unread balance rendered as 'you hold 0'");
   });
 
   it("and the picker shows the same standing at the moment of choosing", () => {
     const create = readFileSync(new URL("./screens/CreateAgent.tsx", import.meta.url), "utf8");
     assert.match(create, /create-locked/);
-    assert.match(create, /This one won&apos;t run yet/);
+    // Both answers render through the catalogue; the keys are pinned in the
+    // picker and the sentences in EN.
+    assert.match(create, /onboard\.lockedTitle/);
+    assert.match(EN["onboard.lockedTitle" as MessageKey] as string, /This one won't run yet/);
     // An unreadable balance is its own answer there too, never "you hold too
     // little" — somebody would go and buy more on the strength of our outage.
-    assert.match(create, /That&apos;s our read failing, not your wallet/);
+    assert.match(create, /onboard\.lockedUnreadable/);
+    assert.match(EN["onboard.lockedUnreadable" as MessageKey] as string, /That's our read failing, not your wallet/);
   });
 });
 
@@ -232,8 +240,17 @@ describe("whose tokens each screen counts", () => {
   it("CREATE JUDGES THE WALLET ALONE, and says what a new agent does not inherit", async () => {
     const create = readFileSync(new URL("./screens/CreateAgent.tsx", import.meta.url), "utf8");
     assert.match(create, /!newAgentQualifies\(tier\)/);
-    assert.match(create, /Your wallet holds \{count\(tier\.holderTokens\)\} \$MERRYMEN/);
-    assert.match(create, /stays with\s+that agent — a new agent starts without it/);
+    // The shortfall renders through the catalogue with the wallet's own
+    // counts in {have} and {need} — never `?? 0`, never the combined figure.
+    assert.match(create, /t\("onboard\.lockedNeeds",\{have:count\(tier\.holderTokens\),need:count\(tier\.needTokens\)/);
+    assert.match(
+      EN["onboard.lockedNeeds" as MessageKey] as string,
+      /Your wallet holds \{have\} \$MERRYMEN and this one needs \{need\}/,
+    );
+    assert.match(
+      EN["onboard.agentTokensStay" as MessageKey] as string,
+      /stays with that agent — a new agent starts without it/,
+    );
     assert.doesNotMatch(create, /tokens \?\? 0/, "an unread count is a dash, not a zero");
     const { newAgentQualifies, UNREADABLE_TIER } = await import("./tier");
     const t = { ...UNREADABLE_TIER, why: "ok" as const, needTokens: 100_000 };
@@ -268,7 +285,10 @@ describe("whose tokens each screen counts", () => {
     const guard = settings.lastIndexOf("{tier?.energyGate && (", at);
     assert.ok(guard > 0 && at - guard < 200, "the paragraph sits directly inside the energyGate guard");
     const create = readFileSync(new URL("./screens/CreateAgent.tsx", import.meta.url), "utf8");
-    assert.match(create, /tier\.energyGate &&[\s\S]{0,400}Your agent runs at full energy/);
+    // The paragraph renders through the catalogue; the guard around it is
+    // what this pins, plus the sentence in EN.
+    assert.match(create, /tier\.energyGate &&[\s\S]{0,400}onboard\.energyNote/);
+    assert.match(EN["onboard.energyNote" as MessageKey] as string, /Your agent runs at full energy/);
   });
 
   it("AND SAYS WHAT THE TOKEN IS FOR, and only that", () => {
@@ -298,16 +318,23 @@ const flat = (src: string) => src.replace(/"\s*\+\s*"/g, "").replace(/\s+/g, " "
 describe("every surface says what a short Circle agent still does", () => {
   it("THE WEB BANNER: it opens nothing new, leaves its basket as it is, and says nothing about closing what it holds", () => {
     const agent = read("./screens/Agent.tsx");
-    assert.match(agent, /is a Merry Circle strategy — it opens nothing new right now\./);
-    assert.match(flat(agent), SENTENCE);
+    // The banner renders through the catalogue now: the keys on this side,
+    // the sentences in EN — same as Settings and Create below.
+    assert.match(agent, /t\("agent\.circleTitle"/);
+    assert.match(
+      EN["agent.circleTitle" as MessageKey] as string,
+      /is a Merry Circle strategy — it opens nothing new right now\./,
+    );
+    assert.match(agent, /t\("agent\.circleBody"/);
+    assert.match(flat(EN["agent.circleBody" as MessageKey] as string), SENTENCE);
     assert.doesNotMatch(agent, /still closes what it holds/, "the strategy's own sells do not run below the tier");
     assert.doesNotMatch(agent, /it isn&apos;t running/, "class exits run below the tier");
   });
 
   it("SETTINGS AND CREATE, WEB: the same sentence, never 'stay idle'", () => {
-    // Settings renders the sentence through the catalogue; CreateAgent still
-    // carries it literally. Both ends are pinned: the key on one side, the
-    // words on the other, and the catalogue holding the sentence itself.
+    // Both screens render the sentence through the catalogue now. Both ends
+    // are pinned: the key on each side, and the catalogue holding the
+    // sentence itself.
     const settings = flat(read("./screens/Settings.tsx"));
     assert.match(settings, /t\("settings\.text\.holdingShortfall"/);
     assert.doesNotMatch(settings, /stays? idle until you hold enough/);
@@ -316,8 +343,9 @@ describe("every surface says what a short Circle agent still does", () => {
       /opens nothing new and leaves its basket as it is/,
     );
     const create = flat(read("./screens/CreateAgent.tsx"));
-    assert.match(create, SENTENCE);
+    assert.match(create, /onboard\.lockedNeeds/);
     assert.doesNotMatch(create, /stays? idle until you hold enough/);
+    assert.match(flat(EN["onboard.lockedNeeds" as MessageKey] as string), SENTENCE);
   });
 
   it("iOS AND ANDROID: the same sentence in the native strings", () => {

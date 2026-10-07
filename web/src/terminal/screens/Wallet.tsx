@@ -54,6 +54,8 @@ import { fetchAccountForSession } from "../account-session";
 import { conceptTooltip } from "@merrymen/core";
 import { V4PermissionLine } from "../V4PermissionLine";
 import { canStart } from "@/lib/can-start";
+import { useT } from "@/lib/i18n";
+import type { MessageKey } from "@/lib/messages/en";
 import { usePrivyOwner } from "@/terminal/usePrivyOwner";
 import { RESIGN_ANCHOR, SIGNED_IN_EVENT, SIGNED_IN_RELOAD_KEY, shouldJumpToResign, shouldReloadAfterSignIn } from "@/lib/resign-anchor";
 // QUARANTINED, not fixed. This page moves real money, holds owner private keys
@@ -117,26 +119,26 @@ const CAP_FIELDS: Record<keyof GrantCaps, AmountField> = {
 };
 
 /** One-click cap presets — pick a temperament, tweak if you like, ride. */
-const PRESETS: { id: string; icon: string; label: string; blurb: string; caps: GrantCaps }[] = [
+const PRESETS: { id: string; icon: string; label: MessageKey; blurb: MessageKey; caps: GrantCaps }[] = [
   {
     id: "scout",
     icon: "shield",
-    label: "cautious · the scout",
-    blurb: "dip a toe — tiny trades, tight leash",
+    label: "wallet.presetScout",
+    blurb: "wallet.presetScoutBlurb",
     caps: { perTradeUsdg: 10, dailyUsdg: 50, expiryDays: 7, maxDrawdownPct: 5, maxOpsPerDay: 24 },
   },
   {
     id: "outlaw",
     icon: "target",
-    label: "balanced · the outlaw",
-    blurb: "the sensible default",
+    label: "wallet.presetOutlaw",
+    blurb: "wallet.presetOutlawBlurb",
     caps: DEFAULTS,
   },
   {
     id: "warlord",
     icon: "bolt",
-    label: "bold · the warlord",
-    blurb: "bigger arrows, wider walls",
+    label: "wallet.presetWarlord",
+    blurb: "wallet.presetWarlordBlurb",
     caps: { perTradeUsdg: 200, dailyUsdg: 2000, expiryDays: 30, maxDrawdownPct: 15, maxOpsPerDay: 96 },
   },
 ];
@@ -249,7 +251,8 @@ function chainLabel(id: number): string {
   return id === TESTNET ? `testnet · ${TESTNET}` : `mainnet · ${MAINNET}`;
 }
 
-function CopyBtn({ value, label = "copy" }: { value: string; label?: string }) {
+function CopyBtn({ value, label }: { value: string; label?: string }) {
+  const t = useT();
   const [done, setDone] = useState(false);
   return (
     <button
@@ -264,7 +267,7 @@ function CopyBtn({ value, label = "copy" }: { value: string; label?: string }) {
         }
       }}
     >
-      {done ? "copied ✓" : label}
+      {done ? t("wallet.copied") : (label ?? t("wallet.copy"))}
     </button>
   );
 }
@@ -282,6 +285,7 @@ function CopyBtn({ value, label = "copy" }: { value: string; label?: string }) {
  * the server thinks about this grant.
  */
 function WalletRow({ w }: { w: SavedWallet }) {
+  const t = useT();
   const [bal, setBal] = useState<Funding | null>(null);
   const [failed, setFailed] = useState(false);
   const [showKey, setShowKey] = useState(false);
@@ -301,25 +305,25 @@ function WalletRow({ w }: { w: SavedWallet }) {
     <div className="saved-wallet">
       <div className="sw-head">
         <span className="rk">
-          {w.current ? "current" : "previous"} · {chainLabel(w.chainId)}
+          {w.current ? t("wallet.current") : t("wallet.previous")} · {chainLabel(w.chainId)}
         </span>
-        <CopyBtn value={w.smartAccount} label="copy address" />
+        <CopyBtn value={w.smartAccount} label={t("wallet.copyAddress")} />
       </div>
       <span className="rv mono" style={{ wordBreak: "break-all" }}>
         {w.smartAccount}
       </span>
       <div className="sw-bal mono">
         {failed
-          ? "couldn't read the balance — check your connection"
+          ? t("wallet.balanceFailed")
           : bal === null
-            ? "reading the chain…"
+            ? t("wallet.readingChain")
             : `${formatEther(bal.gasWei)} ETH · ${bal.usdg.toFixed(2)} USDG`}
-        {empty && <span className="sw-empty"> — nothing here</span>}
+        {empty && <span className="sw-empty">{t("wallet.nothingHere")}</span>}
       </div>
       {w.ownerKey ? (
         <>
           <button className="copy-btn" onClick={() => setShowKey((v) => !v)}>
-            {showKey ? "hide recovery key" : "show recovery key"}
+            {showKey ? t("wallet.hideKey") : t("wallet.showKey")}
           </button>
           {showKey && (
             <>
@@ -327,16 +331,14 @@ function WalletRow({ w }: { w: SavedWallet }) {
                 {w.ownerKey}
               </span>
               <div className="sw-note">
-                <CopyBtn value={w.ownerKey} label="copy key" /> This key controls the account above and
-                everything in it. Anyone who reads it can take the funds — save it somewhere private, and
-                never paste it into a site that asks for it.
+                <CopyBtn value={w.ownerKey} label={t("wallet.copyKey")} /> {t("wallet.keyWarning")}
               </div>
             </>
           )}
         </>
       ) : (
         <div className="sw-note">
-          No recovery key is stored for this wallet in this browser.
+          {t("wallet.noKeyStored")}
         </div>
       )}
     </div>
@@ -344,6 +346,7 @@ function WalletRow({ w }: { w: SavedWallet }) {
 }
 
 export default function GrantPage() {
+  const t = useT();
   /*
     THE SCOUT, not the outlaw. Caps are sealed into the signature BEFORE the
     account has any money in it, so the default cannot be sized to capital
@@ -457,7 +460,7 @@ export default function GrantPage() {
     void fetchAccountForSession(null)
       .then(async (result) => {
         if (!active || generation !== accountReadGeneration.current) return;
-        if (result.kind !== "ready") throw result.kind === "changed" ? new Error("Account changed while loading.") : result.error;
+        if (result.kind !== "ready") throw result.kind === "changed" ? new Error(t("wallet.errAccountLoading")) : result.error;
         const { session: verifiedSession } = result.account;
         const s = result.account.status as { exists: boolean; gasSponsored?: boolean | null; grant?: Grant };
         // A browser's saved key may belong to a different hosted login. Keep it
@@ -614,7 +617,7 @@ export default function GrantPage() {
   async function verifyCurrentAccount() {
     const expected = session;
     const generation = accountReadGeneration.current;
-    if (serverArmed === null || !expected) throw new Error("We couldn't confirm this account. Try again after it reloads.");
+    if (serverArmed === null || !expected) throw new Error(t("wallet.errConfirmReload"));
     const result = await fetchAccountForSession(expected);
     const freshGrant = result.kind === "ready" ? result.account.status.grant as { smartAccount?: string; chainId?: number; sessionKeyAddress?: string } | undefined : undefined;
     if (generation !== accountReadGeneration.current || result.kind !== "ready" ||
@@ -627,17 +630,17 @@ export default function GrantPage() {
       setSession(null);
       setGrant(null);
       setAccountReadFailed(true);
-      throw new Error("This account changed. Check the wallet again before signing or discarding.");
+      throw new Error(t("wallet.errAccountChanged"));
     }
     return result.account;
   }
 
   /** Re-push the stored grant so the worker obeys it again (undo a desync). */
   async function reArm() {
-    try { await verifyCurrentAccount(); } catch (e) { setError(e instanceof Error ? e.message : "Could not confirm this account."); return; }
+    try { await verifyCurrentAccount(); } catch (e) { setError(e instanceof Error ? e.message : t("wallet.errConfirmAccount")); return; }
     const stored = loadGrant();
     if (stored && needsPermissionReplacement(stored)) {
-      setError("This saved permission was selected for revocation and cannot be re-armed. Review and renew below; your owner recovery access is kept.");
+      setError(t("wallet.errReplaceRequired"));
       return;
     }
     if (!stored?.serialized) {
@@ -647,10 +650,7 @@ export default function GrantPage() {
       // stripped out. There is nothing here to push back. Silent return was
       // this panel's original bug; say it instead, and point at the control
       // that does work from here.
-      setError(
-        "this browser doesn't hold a copy of the signed key — it's reading your agent from the server. " +
-          "Re-sign the key below instead, which arms the worker with a fresh one.",
-      );
+      setError(t("wallet.errAdoptedKey"));
       return;
     }
     // STRIP THE OWNER KEY BEFORE RE-POSTING. loadGrant() reads the localStorage
@@ -681,7 +681,7 @@ export default function GrantPage() {
         setError(refusalMessage(r.status, body.error));
       }
     } catch {
-      setError("couldn't reach the server to re-arm this wallet.");
+      setError(t("wallet.errRearmUnreachable"));
     }
     setReArming(false);
   }
@@ -752,12 +752,12 @@ export default function GrantPage() {
     }
     setCapError(
       r.reason === "ambiguous"
-        ? `That reads as either ${r.readings.join(" or ")} — which did you mean?`
+        ? t("wallet.capAmbiguous", { options: r.readings.join(t("wallet.listOr")) })
         : r.reason === "out-of-range"
-          ? `Enter a number between ${r.min} and ${r.max}.`
+          ? t("wallet.capRange", { min: r.min, max: r.max })
           : r.reason === "empty"
-            ? "This limit needs a number."
-            : "That is not a number I can read.",
+            ? t("wallet.capEmpty")
+            : t("wallet.capUnreadable"),
     );
   };
 
@@ -805,14 +805,14 @@ export default function GrantPage() {
     // reachable directly — the connect step lives in the /app rail — so someone
     // can land here signed out, and hosted binding needs a wallet AND a session.
     if (session === null) {
-      setError("still checking your session — give it a second and try again.");
+      setError(t("wallet.errSessionChecking"));
       return;
     }
     if (session.hosted && !session.address) {
-      setError("Sign in with your wallet first — a hosted agent is linked to the wallet you sign in with.");
+      setError(t("wallet.errSignInFirst"));
       return;
     }
-    setStatus("starting…");
+    setStatus(t("wallet.starting"));
     try {
       await verifyCurrentAccount();
       if (chainId === MAINNET && privyOwner) {
@@ -822,7 +822,7 @@ export default function GrantPage() {
             setSwitching(false);
             setGrant(candidate);
             setBackedUp(true);
-            setError("This signing wallet already owns this account. Review and renew its existing permission below instead of creating another grant.");
+            setError(t("wallet.errAlreadyOwns"));
             setStatus(null);
             return;
           }
@@ -839,7 +839,7 @@ export default function GrantPage() {
         hostedAs: session.hosted ? (session.address ?? undefined) : undefined,
       };
       if (chainId === MAINNET && !privyOwner) {
-        throw new Error("New mainnet wallets require your signed-in embedded owner wallet. Sign in to create one; existing recovery keys can still restore their original wallets.");
+        throw new Error(t("wallet.errPrivyMainnet"));
       }
       const { local: g, handoff } = chainId === MAINNET
         ? await createPrivyOwnedWallet(privyOwner!.account, privyOwner!.did, options)
@@ -852,7 +852,7 @@ export default function GrantPage() {
       // handoff had succeeded. The panel is for a wallet the server has genuinely
       // forgotten, not for one it just accepted.
       setServerArmed(handoff.ok);
-      if (!handoff.ok) setError(handoff.error ?? "the server refused this grant");
+      if (!handoff.ok) setError(handoff.error ?? t("wallet.errGrantRefused"));
       setStatus(null);
     } catch (e) {
       setStatus(null);
@@ -870,7 +870,7 @@ export default function GrantPage() {
     const key = restoreKey.trim();
     const selectedChain = chainId;
     if (!/^0x[0-9a-fA-F]{64}$/.test(key)) {
-      setError("that isn't an owner key — expected 0x followed by 64 hex characters.");
+      setError(t("wallet.errOwnerKeyFormat"));
       return;
     }
     setPreviewing(true);
@@ -897,7 +897,7 @@ export default function GrantPage() {
     const previousGrant = grant?.smartAccount.toLowerCase() === expectedAccount.toLowerCase() ? grant : null;
     setError(null);
     setRenewed(false);
-    setStatus("starting…");
+    setStatus(t("wallet.starting"));
     try {
       await verifyCurrentAccount();
       const options = {
@@ -939,7 +939,7 @@ export default function GrantPage() {
       // worker had the grant whether or not the server took it, so a refusal was
       // reported as a live agent.
       setServerArmed(handoff.ok);
-      if (!handoff.ok) setError(handoff.error ?? "the server refused this grant");
+      if (!handoff.ok) setError(handoff.error ?? t("wallet.errGrantRefused"));
       setStatus(null);
     } catch (e) {
       setStatus(null);
@@ -1006,7 +1006,7 @@ export default function GrantPage() {
     try {
       try { saveRecoveryGrant(grant); } catch (e) {
         if (revoke) throw e;
-        setSecurityError("Browser recovery details could not be saved. Keep this page open to manage this wallet after stopping.");
+        setSecurityError(t("wallet.errRecoverySave"));
       }
       if (revoke) {
         markPermissionForReplacement(grant);
@@ -1017,18 +1017,18 @@ export default function GrantPage() {
         await verifyCurrentAccount();
         await stopAgent(session?.hosted ? session.address : undefined);
         setServerArmed(false);
-        setSecurityMessage("Stop request accepted. The worker stops on its next check; earlier session keys are not yet revoked on-chain.");
+        setSecurityMessage(t("wallet.stopAccepted"));
       } catch (e) {
         if (!revoke) throw e;
-        setSecurityError(`The service stop was not confirmed: ${e instanceof Error ? e.message : String(e)}. On-chain revocation is being attempted separately.`);
+        setSecurityError(t("wallet.stopUnconfirmed", { detail: e instanceof Error ? e.message : String(e) }));
       }
       if (revoke) {
         const result = await revokeFromBrowser(ownerWallet(), setSecurityMessage);
-        setSecurityMessage(`Earlier permissions on ${chainLabel(grant.chainId)} are revoked on-chain. Transaction: ${result.transactionHash}. Your wallet and withdrawal access are kept.`);
+        setSecurityMessage(t("wallet.revokedTx", { chain: chainLabel(grant.chainId), tx: result.transactionHash }));
         setRevokeAck(false);
       }
     } catch (e) {
-      setSecurityError(e instanceof Error ? e.message : "Could not confirm this action. Your wallet was kept.");
+      setSecurityError(e instanceof Error ? e.message : t("wallet.errActionKept"));
     } finally {
       setSecurityBusy(false);
     }
@@ -1042,7 +1042,7 @@ export default function GrantPage() {
     let preflightPassed = false;
     setError(null);
     setRenewed(false);
-    setStatus("checking your permission…");
+    setStatus(t("wallet.checkingPermission"));
     setRenewing(true);
     try {
       await verifyCurrentAccount();
@@ -1055,10 +1055,10 @@ export default function GrantPage() {
             client.readContract({address:priorTrencher.vault,abi:TRENCHER_VAULT_ABI,functionName:"tokens"}),
             client.readContract({address:CASH.USDG,abi:erc20Abi,functionName:"balanceOf",args:[priorTrencher.vault]}),
           ]);
-          if (held.length || cash > 0n) throw new Error("Close or recover your Trencher vault positions and cash before removing or changing this permission. Your current key has not been replaced.");
+          if (held.length || cash > 0n) throw new Error(t("wallet.errTrencherHeld"));
         }
       }
-      if (autonomousTrencher && !TRENCHER_FACTORY) throw new Error("The verified Trencher deployment is unavailable; your existing permission has not been replaced.");
+      if (autonomousTrencher && !TRENCHER_FACTORY) throw new Error(t("wallet.errTrencherMissing"));
       // FETCH SETTINGS AT CLICK TIME, not from mount state. This is the exact
       // button an owner presses right after saving a new token or the adapter
       // address in /settings — and the mount-time fetch predates that save, so
@@ -1070,21 +1070,21 @@ export default function GrantPage() {
       let freshClassFactory: `0x${string}` | undefined;
       try {
         const r = await fetch("/api/settings", { cache: "no-store" });
-        if (!r.ok) throw new Error("settings unavailable");
+        if (!r.ok) throw new Error(t("wallet.errSettingsDown"));
         const body: unknown = await r.json();
         if (!body || typeof body !== "object" || !("values" in body) ||
             !body.values || typeof body.values !== "object" || Array.isArray(body.values)) {
-          throw new Error("invalid settings response");
+          throw new Error(t("wallet.errSettingsInvalid"));
         }
         const v = body.values as Record<string, unknown>;
         if (v.customTokens !== undefined &&
             (!Array.isArray(v.customTokens) || !v.customTokens.every(isValidCustomToken))) {
-          throw new Error("invalid custom tokens");
+          throw new Error(t("wallet.errTokensInvalid"));
         }
         const addressSetting = (value: unknown): `0x${string}` | undefined => {
           if (value === undefined || value === "") return undefined;
           if (typeof value !== "string" || !/^0x[0-9a-fA-F]{40}$/.test(value)) {
-            throw new Error("invalid adapter settings");
+            throw new Error(t("wallet.errAdapterInvalid"));
           }
           return value as `0x${string}`;
         };
@@ -1099,7 +1099,7 @@ export default function GrantPage() {
       } catch {
         // An unavailable response is not an empty settings record: signing
         // stale mount state could silently leave out the adapter just saved.
-        throw new Error("Could not refresh your trading settings. Retry when settings are available.");
+        throw new Error(t("wallet.errSettingsRefresh"));
       }
       // The SELECTED chain and the CURRENT caps — not the old grant's. The old
       // behaviour reused grant.chainId and grant.caps, so renewing while the
@@ -1158,13 +1158,13 @@ export default function GrantPage() {
       // Same correction as create/restore: report what the server said, so a
       // renewed key that the server refused doesn't read as a renewed agent.
       setServerArmed(handoff.ok);
-      if (!handoff.ok) setError(handoff.error ?? "the server refused the renewed grant");
+      if (!handoff.ok) setError(handoff.error ?? t("wallet.errGrantRenewRefused"));
       if (handoff.ok) renewalFocus.current = "complete";
       setRenewed(handoff.ok);
       setRenewalAck(false);
     } catch (e) {
       if (stopped) setServerArmed(false);
-      setError(`${revoked ? "Earlier permissions were revoked, but a replacement was not activated. " : stopped ? "The service accepted the stop request. " : !preflightPassed ? "This attempt kept your existing permission unchanged. " : ""}${e instanceof Error ? e.message : String(e)}`);
+      setError(`${revoked ? t("wallet.renewRevokedNoReplace") : stopped ? t("wallet.renewStoppedOnly") : !preflightPassed ? t("wallet.renewUnchanged") : ""}${e instanceof Error ? e.message : String(e)}`);
     } finally {
       setStatus(null);
       setRenewing(false);
@@ -1185,11 +1185,7 @@ export default function GrantPage() {
     if ((funding?.usdgUnits ?? 0n) > 0n) {
       const amt = funding ? funding.usdg.toFixed(2) : "some";
       const okToDrop = window.confirm(
-        `This wallet still holds ${amt} USDG.\n\n` +
-          `Discarding it here does NOT move the funds — they stay in the smart account and can ` +
-          `only be reached with THIS wallet's owner key. Back that key up first, or sweep the ` +
-          `funds out now by running:  merrymen recover\n\n` +
-          `Discard anyway?`,
+        t("wallet.discardFunded", { amount: amt }),
       );
       if (!okToDrop) return;
     }
@@ -1224,13 +1220,7 @@ export default function GrantPage() {
      */
     if (grant && !grant.demoOwnerPrivateKey) {
       const okToKeepHistory = window.confirm(
-        `Starting over forgets the signed key, and your account address does not change.\n\n` +
-          `It comes from the login you signed in with, so the next agent lands on the same ` +
-          `address.\n\n` +
-          `If you are on PAPER, the paper book restarts: cash back to the starting stake, ` +
-          `positions cleared, and earlier paper trades kept on file but no longer counted.\n\n` +
-          `If you are trading for REAL, nothing is deleted — your positions, trades and P&L stay ` +
-          `exactly as they are.\n\nStart over anyway?`,
+        t("wallet.discardHistory"),
       );
       if (!okToKeepHistory) return;
     }
@@ -1260,11 +1250,11 @@ export default function GrantPage() {
         body: JSON.stringify({ expectedTenant: session?.hosted ? session.address : undefined }) });
       if (!res.ok) {
         const body = await res.json().catch(() => null) as { error?: string } | null;
-        setError(body?.error ?? `The server did not discard the grant (${res.status}). Your wallet is still saved here; try again.`);
+        setError(body?.error ?? t("wallet.errDiscardRefused", { status: res.status }));
         return;
       }
     } catch {
-      setError("The server could not confirm the kill. Your wallet is still saved here; check the connection and try again.");
+      setError(t("wallet.errKillUnconfirmed"));
       return;
     } finally {
       setDiscarding(false);
@@ -1273,7 +1263,7 @@ export default function GrantPage() {
     // answers. This response is not permission to clear that wallet or backup.
     const currentGrant = loadGrant();
     if (currentGrant?.smartAccount !== discardedGrant?.smartAccount || currentGrant?.serialized !== discardedGrant?.serialized) {
-      setError("The saved wallet changed while the kill was pending. The newer wallet and its backup were kept; check its status before trying again.");
+      setError(t("wallet.errWalletSwapped"));
       return;
     }
     try {
@@ -1281,7 +1271,7 @@ export default function GrantPage() {
       localStorage.removeItem(BACKUP_KEY);
     } catch (e) {
       setServerArmed(false);
-      setError(`The service accepted the stop, but browser cleanup failed. Your recovery data was kept. ${e instanceof Error ? e.message : String(e)}`);
+      setError(t("wallet.errCleanupFailed", { detail: e instanceof Error ? e.message : String(e) }));
       return;
     }
     setRenewed(false);
@@ -1321,11 +1311,11 @@ export default function GrantPage() {
   const capChanges = grant
     ? (
         [
-          ["per-trade", caps.perTradeUsdg, grant.caps.perTradeUsdg, "USDG"],
-          ["daily", caps.dailyUsdg, grant.caps.dailyUsdg, "USDG"],
-          ["trades/day", caps.maxOpsPerDay, grant.caps.maxOpsPerDay, ""],
-          ["expiry", caps.expiryDays, grant.caps.expiryDays, "days"],
-          ["breaker", caps.maxDrawdownPct, grant.caps.maxDrawdownPct, "%"],
+          [t("wallet.changePerTrade"), caps.perTradeUsdg, grant.caps.perTradeUsdg, "USDG"],
+          [t("wallet.changeDaily"), caps.dailyUsdg, grant.caps.dailyUsdg, "USDG"],
+          [t("wallet.changeTradesDay"), caps.maxOpsPerDay, grant.caps.maxOpsPerDay, ""],
+          [t("wallet.changeExpiry"), caps.expiryDays, grant.caps.expiryDays, t("wallet.unitDays")],
+          [t("wallet.changeBreaker"), caps.maxDrawdownPct, grant.caps.maxDrawdownPct, "%"],
         ] as const
       )
         .filter(([, now, was]) => now !== was)
@@ -1340,7 +1330,7 @@ export default function GrantPage() {
    */
   const allChanges =
     grant && chainId !== grant.chainId
-      ? [`chain ${grant.chainId === MAINNET ? "Robinhood Chain" : "testnet"} → ${chainId === MAINNET ? "Robinhood Chain" : "testnet"}`, ...capChanges]
+      ? [t("wallet.changeChain", { from: grant.chainId === MAINNET ? t("wallet.chainMainnet") : t("wallet.chainTestnet"), to: chainId === MAINNET ? t("wallet.chainMainnet") : t("wallet.chainTestnet") }), ...capChanges]
       : capChanges;
   const anyChange = allChanges.length > 0;
 
@@ -1430,22 +1420,22 @@ export default function GrantPage() {
     window.addEventListener(SIGNED_IN_EVENT, again);
     return () => window.removeEventListener(SIGNED_IN_EVENT, again);
   }, []);
-  const RAIL = ["Wallet", "Backup", "Funds", "Ready"] as const;
-  const KICKS = ["Step one · set the wall", "Step two · back up the key", "Step three · fund the account"];
+  const RAIL = [t("wallet.railWallet"), t("wallet.railBackup"), t("wallet.railFunds"), t("wallet.railReady")] as const;
+  const KICKS = [t("wallet.kickOne"), t("wallet.kickTwo"), t("wallet.kickThree")];
 
   // An HTTP error cannot establish that the server discarded this wallet.
   // Hide server actions until the authenticated status is known, but keep
   // locally saved recovery keys available during an outage. They need no DB.
-  if (serverArmed === null) return <AppShell><PageHeader title="Wallet & permissions" />
+  if (serverArmed === null) return <AppShell><PageHeader title={t("wallet.title")} />
     <section className="grant-shell" role="status">
-      {accountReadFailed ? <><h1>Couldn&rsquo;t check your agent</h1><p>We can&rsquo;t confirm this wallet&rsquo;s status right now.</p>
-        <button className="flow-secondary" type="button" onClick={() => { accountReadGeneration.current++; setAccountReadFailed(false); setAccountReadVersion((n) => n + 1); }}>Try again</button></>
-        : <p>Checking your agent…</p>}
+      {accountReadFailed ? <><h1>{t("wallet.loadFailedTitle")}</h1><p>{t("wallet.loadFailedBody")}</p>
+        <button className="flow-secondary" type="button" onClick={() => { accountReadGeneration.current++; setAccountReadFailed(false); setAccountReadVersion((n) => n + 1); }}>{t("wallet.retry")}</button></>
+        : <p>{t("wallet.checkingAgent")}</p>}
       {securityMessage && <p role="status">{securityMessage}</p>}
       {securityError && <p role="alert">{securityError}</p>}
       {savedWallets.length > 0 && <div className="saved-wallets">
-        <h2>Wallets saved in this browser</h2>
-        <p>These recovery keys are stored on this device and remain available while the service is down.</p>
+        <h2>{t("wallet.savedWallets")}</h2>
+        <p>{t("wallet.savedWalletsNote")}</p>
         {savedWallets.map((w) => <WalletRow key={w.smartAccount} w={w} />)}
       </div>}
     </section>
@@ -1466,7 +1456,7 @@ export default function GrantPage() {
      */
     <AppShell>
       <PageHeader
-        title="Wallet & permissions"
+        title={t("wallet.title")}
         /* THE CHAIN INDICATOR MOVES, IT DOES NOT GO. Its markup and its
            classes are exactly as they were; only its parent changed. On a
            page that seals spending caps, which chain they are being sealed
@@ -1500,13 +1490,13 @@ export default function GrantPage() {
 
         <div className="grant-shell">
         {grant && !switching && <section id="permission-security" className="grant-summary" style={{ marginBottom: 16 }}>
-          <h2>Stop or revoke permissions</h2>
-          <p>Stopping this service needs no wallet signature. Revocation is a separate owner-authorized transaction on {chainLabel(grant.chainId)} that invalidates earlier session keys, including copies. Your account and recovery access stay available.</p>
-          <button className="copy-btn" disabled={securityBusy || renewing} onClick={() => void stopOrRevoke(false)}>Stop agent now</button>
+          <h2>{t("wallet.stopTitle")}</h2>
+          <p>{t("wallet.stopBody", { chain: chainLabel(grant.chainId) })}</p>
+          <button className="copy-btn" disabled={securityBusy || renewing} onClick={() => void stopOrRevoke(false)}>{t("wallet.stopNow")}</button>
           {resignBy ? <>
-            <label className="ack-row" style={{ marginTop: 12 }}><input type="checkbox" checked={revokeAck} disabled={securityBusy || renewing} onChange={e => setRevokeAck(e.target.checked)} /><span>I understand revocation uses ETH for network fees on this network and stops all earlier permissions for this account.</span></label>
-            <button className="grant-btn" disabled={securityBusy || renewing || !revokeAck} onClick={() => void stopOrRevoke(true)}>{securityBusy ? "Checking…" : "Stop & revoke on-chain"}</button>
-          </> : <p>Sign in as the owner or restore the recovery key to revoke on-chain. You can still stop the service now.</p>}
+            <label className="ack-row" style={{ marginTop: 12 }}><input type="checkbox" checked={revokeAck} disabled={securityBusy || renewing} onChange={e => setRevokeAck(e.target.checked)} /><span>{t("wallet.revokeAck")}</span></label>
+            <button className="grant-btn" disabled={securityBusy || renewing || !revokeAck} onClick={() => void stopOrRevoke(true)}>{securityBusy ? t("wallet.checking") : t("wallet.stopRevoke")}</button>
+          </> : <p>{t("wallet.revokeNoKey")}</p>}
           {securityMessage && <p role="status">{securityMessage}</p>}
           {securityError && <p role="alert">{securityError}</p>}
         </section>}
@@ -1525,7 +1515,7 @@ export default function GrantPage() {
         {session?.hosted && session.address && (
           <div className="grant-session">
             <span>
-              signed in as <code>{session.address}</code>
+              {t("wallet.signedInAs")} <code>{session.address}</code>
             </span>
             <SignOut after={() => window.location.reload()} className="flow-secondary" />
           </div>
@@ -1533,9 +1523,9 @@ export default function GrantPage() {
         {/* ─── desync banner: browser has a wallet the server no longer holds ── */}
         {desynced && (
           <div className="grant-panel desync-panel">
-            <h1 className="grant-title">this wallet isn&apos;t active</h1>
+            <h1 className="grant-title">{t("wallet.desyncTitle")}</h1>
             <p className="grant-sub">
-              Trading is inactive. Reconnect this wallet to resume, or choose another wallet.
+              {t("wallet.desyncBody")}
             </p>
             {/* THE REASON, ON THE SCREEN THAT REPORTS THE PROBLEM. The shared
                 error line lives inside the create panel (it is nested under
@@ -1543,7 +1533,7 @@ export default function GrantPage() {
                 which is every desync. A refusal here was therefore invisible no
                 matter which path produced it, and pressing re-arm looked like a
                 button that did nothing. */}
-            {error && <div className="grant-error mono">{error}{isWallTooWide(error) && <> <a href="/settings">Review custom tokens</a></>}</div>}
+            {error && <div className="grant-error mono">{error}{isWallTooWide(error) && <> <a href="/settings">{t("wallet.reviewTokens")}</a></>}</div>}
             {/* WHAT IS ACTUALLY IN IT, and the key to it. A wallet reaches this
                 panel precisely when the server won't arm it, which is also when
                 someone is most likely to think their money has vanished. The
@@ -1561,10 +1551,10 @@ export default function GrantPage() {
                 if (session?.hosted || replacementRequired) document.getElementById(RESIGN_ANCHOR)?.scrollIntoView({ block: "center" });
                 else void reArm();
               }} disabled={reArming || renewing || securityBusy} style={{ flex: 1 }}>
-                {reArming ? "re-arming…" : session?.hosted || replacementRequired ? "review and renew permission" : "re-arm this wallet"}
+                {reArming ? t("wallet.rearming") : session?.hosted || replacementRequired ? t("wallet.reviewRenew") : t("wallet.rearm")}
               </button>
               <button className="btn-kill" onClick={() => void discard()} disabled={discarding || renewing || securityBusy} style={{ flex: 1 }}>
-                {discarding ? "discarding…" : "discard & start fresh"}
+                {discarding ? t("wallet.discarding") : t("wallet.discardFresh")}
               </button>
             </div>
           </div>
@@ -1579,7 +1569,7 @@ export default function GrantPage() {
             should not have to be at the right point in a wizard to find it. */}
         {savedWallets.some((w) => !w.current) && (
           <div className="grant-panel">
-            <h2 className="grant-title">wallets you used before</h2>
+            <h2 className="grant-title">{t("wallet.usedBefore")}</h2>
             <div className="saved-wallets">
               {savedWallets
                 .filter((w) => !w.current)
@@ -1596,7 +1586,7 @@ export default function GrantPage() {
             <fieldset className="grant-renewal-fields" disabled={status !== null || previewing}>
             {switching && grant && (
               <div className="switch-note">
-                Restoring replaces your active wallet, <span className="mono">{short(grant.smartAccount)}</span>. You can still access it under saved wallets.
+                {t("wallet.switchReplacesA")} <span className="mono">{short(grant.smartAccount)}</span>{t("wallet.switchReplacesB")}
                 <button
                   className="copy-btn"
                   style={{ marginTop: 10 }}
@@ -1607,7 +1597,7 @@ export default function GrantPage() {
                     setRestoreKey("");
                   }}
                 >
-                  ← never mind, keep {short(grant.smartAccount)}
+                  {t("wallet.neverMind", { account: short(grant.smartAccount) })}
                 </button>
               </div>
             )}
@@ -1619,7 +1609,7 @@ export default function GrantPage() {
                   window.location.href = "/create";
                 }}
               >
-                new wallet
+                {t("wallet.newWallet")}
               </button>
               <button
                 type="button"
@@ -1629,21 +1619,21 @@ export default function GrantPage() {
                   setError(null);
                 }}
               >
-                restore a funded wallet
+                {t("wallet.restoreWallet")}
               </button>
             </div>
 
             <h1 className="grant-title">
-              {mode === "create" ? "Create your agent's wallet" : "Restore your funded wallet"}
+              {mode === "create" ? t("wallet.createTitle") : t("wallet.restoreTitle")}
             </h1>
             <p className="grant-sub">
               {mode === "create" ? (
                 <>
-                  Choose a network and set your agent&apos;s trading limits.
+                  {t("wallet.createSub")}
                 </>
               ) : (
                 <>
-                  Enter your <b>recovery key</b> to restore your wallet with updated trading limits.{" "}
+                  {t("wallet.restoreSub")}{" "}
                 </>
               )}
             </p>
@@ -1663,8 +1653,8 @@ export default function GrantPage() {
                       unused". Practice mode on this service is PAPER TRADING,
                       which is a setting and needs no separate chain. */}
                   {session?.hosted
-                    ? "Not for this service — your agent trades Robinhood Chain, so a key signed here cannot trade at all. For simulated trading, turn Paper on in Settings instead."
-                    : "Simulated trading at live prices. No real deposits needed."}
+                    ? t("wallet.testnetHosted")
+                    : t("wallet.testnetOpen")}
                 </span>
               </button>
               <button
@@ -1674,14 +1664,14 @@ export default function GrantPage() {
               >
                 <span className="chain-card-title"><GI d="coin" size={16} /> Robinhood Chain (4663)</span>
                 <span className="chain-card-body">
-                  The real Robinhood Chain — real funds, real trades. Only when you&apos;re ready.
+                  {t("wallet.mainnetBody")}
                 </span>
               </button>
             </div>
 
             {isMainnet && (
               <div className="mainnet-warning">
-                This permission allows trading with real funds. Keep your recovery key private and choose limits you’re comfortable with.
+                {t("wallet.mainnetWarn")}
                 <label className="ack-row" style={{ marginTop: 10 }}>
                   <input
                     type="checkbox"
@@ -1689,7 +1679,7 @@ export default function GrantPage() {
                     onChange={(e) => setMainnetAck(e.target.checked)}
                   />
                   <span>
-                    I understand — real funds. Anyone with my owner recovery key can bypass every cap and control my funds.
+                    {t("wallet.mainnetAck")}
                   </span>
                 </label>
               </div>
@@ -1697,28 +1687,28 @@ export default function GrantPage() {
 
             {mode === "restore" && (
               <div className="restore-box">
-                <span className="field-label">your wallet&apos;s owner key</span>
+                <span className="field-label">{t("wallet.ownerKeyLabel")}</span>
                 <input
                   className="restore-input mono"
                   type="password"
-                  placeholder="0x… (the key you backed up when you created it)"
+                  placeholder={t("wallet.restorePlaceholder")}
                   value={restoreKey}
                   disabled={status !== null}
                   onChange={(e) => { ++restorePreviewGeneration.current; setRestoreKey(e.target.value); setPreview(null); setPreviewFunding(null); setPreviewing(false); setRestoreRevocationAck(false); }}
                   autoComplete="off"
                 />
                 <button className="copy-btn" onClick={() => void checkOwnerKey()} disabled={previewing || status !== null}>
-                  {previewing ? "checking…" : "check this wallet"}
+                  {previewing ? t("wallet.checkingWallet") : t("wallet.checkWallet")}
                 </button>
 
                 {preview && (
                   <div className="restore-preview mono">
                     <div>
-                      <span className="rk">this key controls</span>
+                      <span className="rk">{t("wallet.keyControls")}</span>
                       <span className="rv" style={{ wordBreak: "break-all" }}>{preview.smartAccount}</span>
                     </div>
                     <div>
-                      <span className="rk">which holds</span>
+                      <span className="rk">{t("wallet.keyHolds")}</span>
                       <span className="rv">
                         {previewFunding
                           ? `${previewFunding.usdg.toFixed(2)} USDG · ${(Number(previewFunding.gasWei) / 1e18).toFixed(5)} ETH`
@@ -1727,8 +1717,8 @@ export default function GrantPage() {
                     </div>
                     <div className="restore-confirm">
                       {previewFunding && previewFunding.usdg > 0
-                        ? "✓ Funds found — restore it below and your band rides again."
-                        : "This account is empty on this chain. Pick the other chain above, or try your other owner key."}
+                        ? t("wallet.fundsFound")
+                        : t("wallet.emptyChain")}
                     </div>
                   </div>
                 )}
@@ -1743,27 +1733,26 @@ export default function GrantPage() {
                   className={`preset-card ${sameCaps(caps, p.caps) ? "selected" : ""}`}
                   onClick={() => { setCaps(p.caps); setCapText({}); setCapError(""); }}
                 >
-                  <span className="preset-label"><GI d={p.icon} size={14} /> {p.label}</span>
-                  <span className="preset-blurb">{p.blurb}</span>
+                  <span className="preset-label"><GI d={p.icon} size={14} /> {t(p.label)}</span>
+                  <span className="preset-blurb">{t(p.blurb)}</span>
                   <span className="preset-caps mono">
-                    {p.caps.perTradeUsdg}/trade · {p.caps.dailyUsdg}/day · {p.caps.maxDrawdownPct}% breaker ·{" "}
-                    {p.caps.expiryDays}d key
+                    {t("wallet.presetCaps", { perTrade: p.caps.perTradeUsdg, daily: p.caps.dailyUsdg, breaker: p.caps.maxDrawdownPct, expiry: p.caps.expiryDays })}
                   </span>
                 </button>
               ))}
             </div>
 
-            <p className="field-lead">Pick a preset above, or fine-tune the limits:</p>
+            <p className="field-lead">{t("wallet.pickPreset")}</p>
             <div className="grant-fields">
               <label className="field">
-                <span className="field-label">most it can spend on one trade</span>
+                <span className="field-label">{t("wallet.capPerTrade")}</span>
                 <span className="field-input">
                   <input type="text" inputMode="decimal" value={capShown("perTradeUsdg")} onChange={set("perTradeUsdg")} />
                   <span className="field-unit">USDG</span>
                 </span>
               </label>
               <label className="field">
-                <span className="field-label">most it can spend in a day</span>
+                <span className="field-label">{t("wallet.capPerDay")}</span>
                 <span className="field-input">
                   <input type="text" inputMode="decimal" value={capShown("dailyUsdg")} onChange={set("dailyUsdg")} />
                   <span className="field-unit">USDG</span>
@@ -1771,25 +1760,25 @@ export default function GrantPage() {
               </label>
               <label className="field">
                 <span className="field-label">
-                  auto-expire the agent after{" "}
-                  <Info>A safety timer. After this many days the agent&apos;s key stops working on its own — so a forgotten agent can&apos;t trade forever.</Info>
+                  {t("wallet.capExpiry")}{" "}
+                  <Info>{t("wallet.expiryTip")}</Info>
                 </span>
                 <span className="field-input">
                   <input type="text" inputMode="numeric" value={capShown("expiryDays")} onChange={set("expiryDays")} />
-                  <span className="field-unit">days</span>
+                  <span className="field-unit">{t("wallet.unitDays")}</span>
                 </span>
               </label>
               <label className="field">
-                <span className="field-label">most trades per day</span>
+                <span className="field-label">{t("wallet.capOps")}</span>
                 <span className="field-input">
                   <input type="text" inputMode="numeric" value={capShown("maxOpsPerDay")} onChange={set("maxOpsPerDay")} />
-                  <span className="field-unit">trades</span>
+                  <span className="field-unit">{t("wallet.unitDayTrades")}</span>
                 </span>
               </label>
               <label className="field">
                 <span className="field-label">
-                  stop if it&apos;s down by{" "}
-                  <Info>A circuit breaker. If the account drops this far from its best value, the agent stops trading automatically to stem the bleeding.</Info>
+                  {t("wallet.capDrawdown")}{" "}
+                  <Info>{t("wallet.breakerTip")}</Info>
                 </span>
                 <span className="field-input">
                   <input type="text" inputMode="numeric" value={capShown("maxDrawdownPct")} onChange={set("maxDrawdownPct")} />
@@ -1804,10 +1793,7 @@ export default function GrantPage() {
             )}
 
             <div className="grant-summary">
-              On {isMainnet ? "Robinhood Chain" : "the testnet"}, this agent can trade
-              at most <b>{caps.perTradeUsdg} USDG</b> per trade, <b>{caps.dailyUsdg} USDG</b> per day,
-              and <b>{caps.maxOpsPerDay}</b> trades per day. It stops itself if it&apos;s down{" "}
-              <b>{caps.maxDrawdownPct}%</b>, and its key auto-expires in <b>{caps.expiryDays} days</b>.
+              {t("wallet.capSummary", { chain: isMainnet ? t("wallet.chainMainnet") : t("wallet.chainTestnet"), perTrade: caps.perTradeUsdg, daily: caps.dailyUsdg, ops: caps.maxOpsPerDay, pct: caps.maxDrawdownPct, days: caps.expiryDays })}
               <br />
               <br />
               {/*
@@ -1819,8 +1805,7 @@ export default function GrantPage() {
                 the worker — the process a compromise owns. Saying so costs a sentence and is the
                 difference between a promise and a claim.
               */}
-              The per-trade limit and expiry are enforced by your wallet. Daily spending, drawdown,
-              and trade-count limits depend on the agent software.
+              {t("wallet.enforcementNote")}
               {/*
                 The second copy of this sentence. Trades-per-day was corrected on the
                 loaded-grant panel, in the README, in WallPanel and in Console — and missed
@@ -1834,8 +1819,8 @@ export default function GrantPage() {
               <button className="grant-btn" onClick={onCreate} disabled={status !== null || createBlocked}>
                 {status ??
                   (createBlocked
-                    ? "acknowledge the real-funds warning above first"
-                    : `Create my agent on ${isMainnet ? "Robinhood Chain" : "the testnet"}`)}
+                    ? t("wallet.ackRealFunds")
+                    : t("wallet.createOn", { chain: isMainnet ? t("wallet.chainMainnet") : t("wallet.chainTestnet") }))}
               </button>
             ) : (
               <>
@@ -1852,23 +1837,20 @@ export default function GrantPage() {
                   and someone who had tighter limits should know to set them again.
                 */}
                 <p className="field-lead" style={{ marginTop: 12 }}>
-                  This signs the limits shown above — <b>{caps.perTradeUsdg} USDG</b> a trade,{" "}
-                  <b>{caps.dailyUsdg}</b> a day, key for <b>{caps.expiryDays} days</b>. Your old
-                  limits lived in the key you lost, so nothing can read them back; set them here
-                  if they mattered. Revocation spends ETH for network fees; it does not move your trading balances.
+                  {t("wallet.restoreSigns", { perTrade: caps.perTradeUsdg, daily: caps.dailyUsdg, days: caps.expiryDays })}
                 </p>
                 {preview && <div className="grant-note" data-restore-funding style={{ marginTop: 12 }}>
-                  <b>ETH for revocation fees</b>
-                  <p>Restore revokes earlier permissions on {restoreNetworks.length > 1 ? "both networks below, starting with the current network" : "the network below"} before signing a replacement. Fund this same account address on {restoreNetworks.length > 1 ? "each network" : "this network"}:</p>
+                  <b>{t("wallet.revokeFeesTitle")}</b>
+                  <p>{t("wallet.restoreRevokeNote", { scope: restoreNetworks.length > 1 ? t("wallet.restoreRevokeBoth") : t("wallet.restoreRevokeOne"), fund: restoreNetworks.length > 1 ? t("wallet.restoreRevokeScopeBoth") : t("wallet.restoreRevokeScopeOne") })}</p>
                   <code style={{ display: "block", overflowWrap: "anywhere" }}>{preview.smartAccount}</code>
-                  <CopyBtn value={preview.smartAccount} label="copy restore funding address" />
+                  <CopyBtn value={preview.smartAccount} label={t("wallet.copyRestoreAddress")} />
                   <ul>{restoreNetworks.map(network => <li key={network}>
-                    <b>{network === MAINNET ? "Robinhood Chain" : "Robinhood Chain testnet"} ({network})</b>: send {network === TESTNET ? "testnet ETH" : "ETH"} for network fees.
+                    {t("wallet.revokeNetLine", { chain: network === MAINNET ? t("wallet.chainNameMain") : t("wallet.chainNameTest"), id: network, asset: network === TESTNET ? t("wallet.assetTestEth") : t("wallet.assetEth") })}
                   </li>)}</ul>
-                  {restoreNetworks.includes(TESTNET) && <p><a href={FAUCET_URL} target="_blank" rel="noreferrer">Get testnet ETH from the faucet ↗</a>, then send it to the account above on testnet.</p>}
-                  <p>Balances do not move between networks. Revocation needs ETH even when trading gas is sponsored; an empty destination account also needs ETH. If you see AA21 or an insufficient-funds error, fund the named network and retry here.</p>
+                  {restoreNetworks.includes(TESTNET) && <p><a href={FAUCET_URL} target="_blank" rel="noreferrer">{t("wallet.faucetLink")}</a>{t("wallet.faucetAfter")}</p>}
+                  <p>{t("wallet.balancesNote")}</p>
                 </div>}
-                <label className="ack-row"><input type="checkbox" checked={restoreRevocationAck} disabled={status !== null} onChange={e => setRestoreRevocationAck(e.target.checked)} /><span>I understand restore first stops the service and revokes earlier permissions on {restoreNetworks.map(network => network === MAINNET ? "Robinhood Chain (4663)" : "Robinhood Chain testnet (46630)").join(" and ")}. The account needs ETH for network fees on {restoreNetworks.length > 1 ? "both networks" : "this network"} before a new permission can be signed.</span></label>
+                <label className="ack-row"><input type="checkbox" checked={restoreRevocationAck} disabled={status !== null} onChange={e => setRestoreRevocationAck(e.target.checked)} /><span>{t("wallet.restoreAck", { chains: restoreNetworks.map(network => network === MAINNET ? t("wallet.chainMainnetParen") : t("wallet.chainTestnetParen")).join(t("wallet.listAnd")), scope: restoreNetworks.length > 1 ? t("wallet.restoreRevokeScopeBoth") : t("wallet.restoreRevokeScopeOne") })}</span></label>
                 <button
                   className="grant-btn"
                   onClick={() => void onRestore()}
@@ -1876,14 +1858,14 @@ export default function GrantPage() {
                 >
                   {status ??
                     (createBlocked
-                      ? "acknowledge the real-funds warning above first"
+                      ? t("wallet.ackRealFunds")
                       : !preview
-                        ? "check your owner key above first"
-                        : `Restore & arm ${short(preview.smartAccount)}`)}
+                        ? t("wallet.checkKeyFirst")
+                        : t("wallet.restoreArm", { account: short(preview.smartAccount) }))}
                 </button>
               </>
             )}
-            {error && <div className="grant-error mono">{error}{isWallTooWide(error) && <> <a href="/settings">Review custom tokens</a></>}</div>}
+            {error && <div className="grant-error mono">{error}{isWallTooWide(error) && <> <a href="/settings">{t("wallet.reviewTokens")}</a></>}</div>}
             </fieldset>
           </div>
         )}
@@ -1891,16 +1873,14 @@ export default function GrantPage() {
         {/* ─── phase 2: back up the owner key (gated) ──────────────────── */}
         {grant && !backedUp && !desynced && !switching && (
           <div className="grant-panel">
-            <h1 className="grant-title">back up your owner key</h1>
+            <h1 className="grant-title">{t("wallet.backupTitle")}</h1>
             <p className="grant-sub">
-              This key controls the account and <b>every dollar you fund it with</b>. It lives only
-              in this browser. Save it somewhere safe now — if you lose it, the funds are gone. We
-              can&apos;t recover it for you.
+              {t("wallet.backupBody")}
             </p>
 
             <div className="key-box mono">
               <div className="key-row">
-                <span className="rk">owner key</span>
+                <span className="rk">{t("wallet.ownerKeyRow")}</span>
                 <span className="rv" style={{ wordBreak: "break-all" }}>
                   {/* The fallback used to read "(external wallet — no key
                       stored)", which was untrue in the only case that reached
@@ -1915,10 +1895,9 @@ export default function GrantPage() {
                       did not happen, on the screen where being wrong costs the
                       most. */}
                   {isPrivyOwned(grant)
-                    ? "held by your Privy login — merrymen never sees it"
+                    ? t("wallet.privyHeld")
                     : reveal
-                      ? (grant.demoOwnerPrivateKey ??
-                        "couldn't read your owner key — don't fund this account, and tell us")
+                      ? (grant.demoOwnerPrivateKey ?? t("wallet.keyUnreadable"))
                       : "•".repeat(40)}
                 </span>
               </div>
@@ -1926,26 +1905,26 @@ export default function GrantPage() {
                 {/* Nothing to reveal when there is nothing held here. */}
                 {!isPrivyOwned(grant) && (
                   <button className="copy-btn" onClick={() => setReveal((r) => !r)}>
-                    {reveal ? "hide" : "reveal"}
+                    {reveal ? t("wallet.hide") : t("wallet.reveal")}
                   </button>
                 )}
                 {grant.demoOwnerPrivateKey && (
-                  <CopyBtn value={grant.demoOwnerPrivateKey} label="copy key" />
+                  <CopyBtn value={grant.demoOwnerPrivateKey} label={t("wallet.copyKey")} />
                 )}
               </div>
             </div>
 
             <label className="ack-row">
               <input type="checkbox" checked={ack} onChange={(e) => setAck(e.target.checked)} />
-              <span>I&apos;ve saved my owner key somewhere safe. I understand losing it means losing the funds.</span>
+              <span>{t("wallet.backupAck")}</span>
             </label>
 
             <button className="grant-btn" onClick={confirmBackup} disabled={!ack}>
-              I&apos;ve backed it up — fund the account
+              {t("wallet.backupDone")}
             </button>
 
             <div className="grant-note">
-              Account: <span className="mono">{short(grant.smartAccount)}</span>
+              {t("wallet.accountRow")} <span className="mono">{short(grant.smartAccount)}</span>
             </div>
           </div>
         )}
@@ -1964,19 +1943,15 @@ export default function GrantPage() {
               <div className="renew-note">
                 <GI d="lock" size={14} /> <b>
                   {uncoveredNames.length === 1
-                    ? "One token in your basket isn't"
-                    : `${uncoveredNames.length} tokens in your basket aren't`}
+                    ? t("wallet.uncoveredOne")
+                    : t("wallet.uncoveredMany", { count: uncoveredNames.length })}
                 </b>{" "}
-                covered by your agent&apos;s current key:{" "}
-                <span className="mono">{uncoveredNames.join(", ")}</span>. The tradable list is
-                sealed into the signature when you sign it, so neither adding a token nor a new pool
-                appearing can widen it.
+                {t("wallet.uncoveredBodyA")}{" "}
+                <span className="mono">{uncoveredNames.join(", ")}</span>{t("wallet.uncoveredBodyB")}
                 <br />
-                Your merryman <b>won&apos;t buy {uncoveredNames.length === 1 ? "it" : "them"}</b> until
-                you re-sign — buying something it can&apos;t sell back would leave you holding a
-                position with no way out, and no cap protects you from that.
+                {uncoveredNames.length === 1 ? t("wallet.uncoveredWontOne") : t("wallet.uncoveredWontMany")}
                 <br />
-                Review and renew your permission below; network fees apply to revoking earlier keys.
+                {t("wallet.reviewRenewFees")}
                 {watchedNotTraded.length > 0 && (
                   /* AND WHAT RE-SIGNING WILL NOT FIX. Coverage and selection are
                      two different gates; this panel only ever spoke about the
@@ -1985,12 +1960,9 @@ export default function GrantPage() {
                   <>
                     <br />
                     <br />
-                    One more thing, and a signature won&apos;t do it:{" "}
+                    {t("wallet.watchIntro")}{" "}
                     <b>{watchedNotTraded.join(", ")}</b>{" "}
-                    {watchedNotTraded.length === 1 ? "is" : "are"} on your watch list but not in
-                    your <b>trading basket</b>, so your agent will follow{" "}
-                    {watchedNotTraded.length === 1 ? "it" : "them"} and never buy. Tick{" "}
-                    {watchedNotTraded.length === 1 ? "it" : "them"} on in Settings → Trading basket.
+                    {watchedNotTraded.length === 1 ? t("wallet.watchOneRest") : t("wallet.watchManyRest")}
                   </>
                 )}
                 {/*
@@ -2010,7 +1982,7 @@ export default function GrantPage() {
                   style={{ marginTop: 10, width: "100%" }}
                   onClick={() => document.getElementById("resign")?.scrollIntoView({ behavior: "smooth", block: "center" })}
                 >
-                  {`re-sign to cover ${uncoveredNames.join(", ")} →`}
+                  {t("wallet.resignCover", { names: uncoveredNames.join(", ") })}
                 </button>
               </div>
             )}
@@ -2025,11 +1997,11 @@ export default function GrantPage() {
               return (
                 <div className={expired ? "renew-note expired" : "renew-note"}>
                   {expired ? (
-                    <><GI d="clock" size={13} /> <b>Your agent&apos;s key has expired.</b> Trading is paused.</>
+                    <><GI d="clock" size={13} /> <b>{t("wallet.keyExpired")}</b> {t("wallet.tradingPaused")}</>
                   ) : (
-                    <><GI d="clock" size={13} /> <b>Your agent&apos;s key expires in {Math.max(1, Math.ceil(secsLeft / 86_400))} day{secsLeft > 86_400 ? "s" : ""}.</b></>
+                    <><GI d="clock" size={13} /> <b>{secsLeft > 86_400 ? t("wallet.keyExpiresMany", { days: Math.max(1, Math.ceil(secsLeft / 86_400)) }) : t("wallet.keyExpiresOne", { days: Math.max(1, Math.ceil(secsLeft / 86_400)) })}</b></>
                   )}{" "}
-                  Review and renew your trading permissions below.
+                  {t("wallet.reviewRenewBelow")}
                   {/*
                     SCROLLS, does not sign. This button used to call renewKey()
                     directly with `disabled={renewing}` as its only guard — which
@@ -2047,31 +2019,26 @@ export default function GrantPage() {
                     style={{ marginTop: 10, width: "100%" }}
                     onClick={() => document.getElementById("resign")?.scrollIntoView({ behavior: "smooth", block: "center" })}
                   >
-                    review and renew permission →
+                    {t("wallet.reviewRenewGo")}
                   </button>
                 </div>
               );
             })()}
-            <h1 className="grant-title">fund your account</h1>
+            <h1 className="grant-title">{t("wallet.fundTitle")}</h1>
             <p className="grant-sub">
               {grantIsTestnet ? (
                 <>
-                  Send only <b>testnet ETH</b> to this address. Trades here use simulated funds.
+                  {t("wallet.fundTestnet")}
                 </>
               ) : (
                 <>
                   {gasSponsored ? (
                     <>
-                      Send <b>USDG (trading capital)</b> on Robinhood Chain (4663) to the account
-                      address below — the network fee on every trade is covered, so USDG is all it
-                      needs to start. <b>Real funds</b> — double-check the address and start with a
-                      small test amount first.
+                      {t("wallet.fundSponsored")}
                     </>
                   ) : (
                     <>
-                      Send <b>ETH (for gas)</b> and <b>USDG (trading capital)</b> on Robinhood Chain
-                      (4663) to the account address below. <b>Real funds</b> — double-check the
-                      address and start with a small test amount first.
+                      {t("wallet.fundStandard")}
                     </>
                   )}
                 </>
@@ -2080,31 +2047,31 @@ export default function GrantPage() {
 
 
             <div className="fund-addr mono">
-              <span className="rk">account address · {chainLabel(grant.chainId)}</span>
+              <span className="rk">{t("wallet.addrRow", { chain: chainLabel(grant.chainId) })}</span>
               <span className="rv" style={{ wordBreak: "break-all" }}>{grant.smartAccount}</span>
-              <CopyBtn value={grant.smartAccount} label="copy address" />
+              <CopyBtn value={grant.smartAccount} label={t("wallet.copyAddress")} />
             </div>
 
             <div className="grant-note" style={{ marginTop: 12 }}>
-              Deposit to the account address above, on {chainLabel(grant.chainId)} only — the same address on any other network is not this agent, and funds sent there are stuck beyond any re-sign. Use <Link href="/profile">Withdraw in Profile</Link> to move funds out.
+              {t("wallet.depositNoteA", { chain: chainLabel(grant.chainId) })} <Link href="/profile">{t("wallet.withdrawProfile")}</Link> {t("wallet.depositNoteB")}
             </div>
 
             <div className="fund-balances">
               <div className={`fund-bal ${gasFunded ? "ok" : ""}`}>
-                <span className="fund-bal-k">native gas</span>
+                <span className="fund-bal-k">{t("wallet.gasRow")}</span>
                 <span className="fund-bal-v mono">
                   {funding ? (Number(funding.gasWei) / 1e18).toFixed(5) : "…"}
                 </span>
                 <span className="fund-bal-s">
                   {gasFunded
-                    ? "funded ✓"
+                    ? t("wallet.funded")
                     : grantIsTestnet
-                      ? "testnet network fees"
+                      ? t("wallet.testnetFees")
                       : gasSponsored
                         // Not 'needed to deploy + trade': it is needed for neither.
                         // The one thing it IS still needed for is the way out.
-                        ? "covered — only needed to withdraw later"
-                        : "needed to deploy + trade"}
+                        ? t("wallet.coveredWithdraw")
+                        : t("wallet.gasNeeded")}
                 </span>
               </div>
               {/* On testnet this tile reads the MAINNET USDG contract, so it is pinned at 0.00
@@ -2117,10 +2084,10 @@ export default function GrantPage() {
                 </span>
                 <span className="fund-bal-s">
                   {grantIsTestnet
-                    ? "not tracked on the testnet — merrymen only knows the mainnet USDG address"
+                    ? t("wallet.usdgUntracked")
                     : usdgFunded
-                      ? "funded ✓"
-                      : "the agent's trading capital"}
+                      ? t("wallet.funded")
+                      : t("wallet.capitalRow")}
                 </span>
               </div>
             </div>
@@ -2128,7 +2095,7 @@ export default function GrantPage() {
             <div className="fund-actions">
               {grantIsTestnet ? (
                 <a className="grant-btn" href={FAUCET_URL} target="_blank" rel="noreferrer" style={{ textAlign: "center", textDecoration: "none" }}>
-                  open the gas faucet ↗
+                  {t("wallet.openFaucet")}
                 </a>
               ) : (
                 <a
@@ -2138,11 +2105,11 @@ export default function GrantPage() {
                   rel="noreferrer"
                   style={{ textAlign: "center", textDecoration: "none" }}
                 >
-                  view on explorer ↗
+                  {t("wallet.viewExplorer")}
                 </a>
               )}
               <button className="copy-btn" onClick={() => grant && refreshFunding(grant.smartAccount, grant.chainId)}>
-                refresh balances
+                {t("wallet.refreshBalances")}
               </button>
             </div>
 
@@ -2150,7 +2117,7 @@ export default function GrantPage() {
               <div className="fund-ready mono">
                 {grantIsTestnet ? (
                   <>
-                    Testnet ETH received. {session?.hosted ? "Open your agent to follow paper trades." : <>Run <code>merrymen start</code> to begin paper trading.</>}
+                    {session?.hosted ? t("wallet.readyTestnetHosted") : t("wallet.readyTestnetCli")}
                   </>
                 ) : usdgFunded ? (
                   <>
@@ -2158,11 +2125,11 @@ export default function GrantPage() {
                         per tenant on its own clock. Telling a hosted owner to run a
                         CLI they never installed is the first instruction the product
                         gives them, and it does not apply. */}
-                    Funds received. {session?.hosted ? <>Open your agent.</> : <>Run <code>merrymen start</code> to begin.</>}
+                    {session?.hosted ? t("wallet.readyFundedHosted") : t("wallet.readyFundedCli")}
                   </>
                 ) : (
                   <>
-                    ETH received. Add <b>USDG</b> for live trading.
+                    {t("wallet.readyGasOnly")}
                   </>
                 )}
                 {/*
@@ -2187,33 +2154,31 @@ export default function GrantPage() {
                   className="grant-btn"
                   style={{ marginTop: 12, width: "100%", textAlign: "center", textDecoration: "none", display: "block" }}
                 >
-                  watch it trade →
+                  {t("wallet.watchTrade")}
                 </Link>
               </div>
             ) : (
               <div className="grant-note">
-                waiting for the first deposit to land — usually under a minute, sometimes
-                a few. this panel checks every few seconds on its own, so leave it open;
-                you do not need to refresh.
-                {!grantIsTestnet && " (no faucet on mainnet — send from your own wallet or exchange)"}
+                {t("wallet.waitingDeposit")}
+                {!grantIsTestnet && t("wallet.noFaucet")}
               </div>
             )}
 
             <div className="grant-result mono" style={{ marginTop: 18 }}>
               <div>
-                <span className="rk">chain</span>
+                <span className="rk">{t("wallet.rowChain")}</span>
                 <span className="rv">{chainLabel(grant.chainId)}</span>
               </div>
               <div>
-                <span className="rk">owner</span>
+                <span className="rk">{t("wallet.rowOwner")}</span>
                 <span className="rv">{short(grant.owner)}</span>
               </div>
               <div>
-                <span className="rk">session key</span>
+                <span className="rk">{t("wallet.rowSessionKey")}</span>
                 <span className="rv">{short(grant.sessionKeyAddress)}</span>
               </div>
               <div>
-                <span className="rk">expires</span>
+                <span className="rk">{t("wallet.rowExpires")}</span>
                 <span className="rv">{fullDateTime(grant.expiresAt * 1000)}</span>
               </div>
             </div>
@@ -2235,19 +2200,19 @@ export default function GrantPage() {
             */}
             <div className="caps caps-row">
               <span className="cap">
-                max <b>{grant.caps.perTradeUsdg} USDG</b>/trade
+                {t("wallet.capMaxTrade", { value: grant.caps.perTradeUsdg })}
                 <Info>{conceptTooltip("Per trade limit")}</Info>
               </span>
               <span className="cap">
-                <b>{grant.caps.dailyUsdg} USDG</b>/day
+                {t("wallet.capDay", { value: grant.caps.dailyUsdg })}
                 <Info>{conceptTooltip("Per day limit")}</Info>
               </span>
               <span className="cap">
-                <b>{grant.caps.maxOpsPerDay}</b> ops/day
+                {t("wallet.capOpsDay", { value: grant.caps.maxOpsPerDay })}
                 <Info>{conceptTooltip("daily cap")}</Info>
               </span>
               <span className="cap">
-                breaker <b>{grant.caps.maxDrawdownPct}%</b>
+                {t("wallet.capBreakerRow", { value: grant.caps.maxDrawdownPct })}
                 <Info>{conceptTooltip("drawdown breaker")}</Info>
               </span>
             </div>
@@ -2260,16 +2225,16 @@ export default function GrantPage() {
               read the JSON. Capability drift you cannot see is capability drift you cannot act on.
             */}
             <div className="grant-summary" style={{ marginTop: 14 }}>
-              <b>Trading permissions</b>
+              <b>{t("wallet.permsTitle")}</b>
               <ul style={{ margin: "10px 0 0", paddingLeft: 18, lineHeight: 1.7 }}>
                 <li>
-                  <b>Stock list</b> —{" "}
+                  <b>{t("wallet.permsStocks")}</b> —{" "}
                   {grant.grantFeatures?.includes(TRADEABLE_V2)
-                    ? "the full tradeable set."
-                    : "the legacy three (QQQ, NVDA, TSLA) only. Re-sign below to widen it."}
+                    ? t("wallet.permsFullSet")
+                    : t("wallet.permsLegacy")}
                 </li>
                 <li>
-                  <b>Withdrawals</b> — use your recovery key in Profile. Renewing removes any older agent transfer permission.
+                  <b>{t("wallet.permsWithdraw")}</b> {t("wallet.permsWithdrawBody")}
                 </li>
                 <V4PermissionLine grant={grant} configuredAdapter={v4Adapter} />
                 {/*
@@ -2285,22 +2250,21 @@ export default function GrantPage() {
                   should not have to read grant.json to find that out.
                 */}
                 <li>
-                  <b>Bonding curves</b> —{" "}
+                  <b>{t("wallet.permsCurves")}</b> —{" "}
                   {grantPonsAdapter(grant) ? (
-                    <>sealed to {short(grantPonsAdapter(grant)!)}.</>
+                    <>{t("wallet.permsSealedTo", { addr: short(grantPonsAdapter(grant)!) })}</>
                   ) : (
-                    "not granted."
+                    t("wallet.permsNotGranted")
                   )}
                 </li>
                 <li>
-                  <b>Class route</b> —{" "}
+                  <b>{t("wallet.permsClass")}</b> —{" "}
                   {grantPonsClassVault(grant) ? (
                     <span style={{ color: "var(--amber, var(--red))" }}>
-                      this key may buy tokens you never named, held in your vault at{" "}
-                      {short(grantPonsClassVault(grant)!)}. <b>Renew below</b> to remove it.
+                      {t("wallet.permsClassWarn", { addr: short(grantPonsClassVault(grant)!) })}
                     </span>
                   ) : (
-                    "not granted."
+                    t("wallet.permsNotGranted")
                   )}
                 </li>
               </ul>
@@ -2331,66 +2295,66 @@ export default function GrantPage() {
               {renewed && !renewing && !error ? (
                 <section id="renewal-complete" data-testid="renewal-complete" tabIndex={-1} aria-labelledby="renewal-complete-title" className="grant-renewal-complete">
                   <div role="status">
-                    <h2 id="renewal-complete-title">Permission renewed</h2>
-                    <p>Earlier permissions were revoked on-chain. The server saved your new permission for <b>{chainLabel(grant.chainId)}</b>.</p>
-                    <p>You&apos;re done signing. Open your agent to see whether it has accepted this permission and any remaining setup steps.</p>
+                    <h2 id="renewal-complete-title">{t("wallet.renewedTitle")}</h2>
+                    <p>{t("wallet.renewedBodyA")} <b>{chainLabel(grant.chainId)}</b>{t("wallet.renewedBodyB")}</p>
+                    <p>{t("wallet.renewedNext")}</p>
                   </div>
-                  <Link href="/chat" className="grant-btn" style={{ display: "block", textAlign: "center", textDecoration: "none" }}>View agent status</Link>
+                  <Link href="/chat" className="grant-btn" style={{ display: "block", textAlign: "center", textDecoration: "none" }}>{t("wallet.viewStatus")}</Link>
                   <button className="copy-btn" style={{ marginTop: 12 }} onClick={() => {
                     setChainId(grant.chainId); setCaps(grant.caps); setCapText({}); setCapError("");
                     setMainnetAck(false); setRenewalAck(false); renewalFocus.current = "form"; setRenewed(false);
-                  }}>Edit permissions again</button>
+                  }}>{t("wallet.editAgain")}</button>
                 </section>
               ) : <>
-              <b>Renew your permission.</b> First, stop the service and revoke earlier permissions on-chain; then sign a replacement with the limits below. Your account address stays the same.
-              <p>Revocation uses ETH for network fees. When moving networks, it runs on both the current and selected networks. Trading stays stopped if revocation or the replacement fails; your recovery access is kept.</p>
-              <p>The replacement uses today&apos;s permission rules. Review the network, assets, and limits before continuing. The owner key bypasses these limits and must stay private.</p>
+              <b>{t("wallet.renewLead")}</b> {t("wallet.renewBodyA")}
+              <p>{t("wallet.renewBodyB")}</p>
+              <p>{t("wallet.renewBodyC")}</p>
               {resignBy ? (
                 <>
                   <fieldset className="grant-renewal-fields" disabled={renewing || securityBusy}>
                   <div className="grant-fields" style={{ marginTop: 12 }}>
                     <label className="field">
-                      <span className="field-label">Autonomous Trencher permission</span>
+                      <span className="field-label">{t("wallet.trencherTitle")}</span>
                       <span>
                         <input type="checkbox" checked={autonomousTrencher} disabled={!TRENCHER_FACTORY}
                           onChange={e=>setAutonomousTrencher(e.target.checked)} />
-                        Allow my agent to discover and trade new pool tokens without adding each contract.
+                        {t("wallet.trencherAllow")}
                       </span>
                       <small>
-                        Tokens stay in your trading vault and sale proceeds return to your account. The vault limits buys to $5 each and $25 per 24-hour window; your lower signed limits still apply. A discovered token can lose all its value or become unsellable. This permission does not turn live trading on.
-                        {!TRENCHER_FACTORY && " The new vault deployment is not configured yet; this permission is unavailable."}
+                        {t("wallet.trencherNote")}
+                        {!TRENCHER_FACTORY && t("wallet.trencherUnavailable")}
                       </small>
                     </label>
                     <label className="field">
-                      <span className="field-label">most it can spend on one trade</span>
+                      <span className="field-label">{t("wallet.capPerTrade")}</span>
                       <span className="field-input">
                         <input type="text" inputMode="decimal" value={capShown("perTradeUsdg")} onChange={set("perTradeUsdg")} />
                         <span className="field-unit">USDG</span>
                       </span>
                     </label>
                     <label className="field">
-                      <span className="field-label">most it can spend in a day</span>
+                      <span className="field-label">{t("wallet.capPerDay")}</span>
                       <span className="field-input">
                         <input type="text" inputMode="decimal" value={capShown("dailyUsdg")} onChange={set("dailyUsdg")} />
                         <span className="field-unit">USDG</span>
                       </span>
                     </label>
                     <label className="field">
-                      <span className="field-label">most trades per day</span>
+                      <span className="field-label">{t("wallet.capOps")}</span>
                       <span className="field-input">
                         <input type="text" inputMode="numeric" value={capShown("maxOpsPerDay")} onChange={set("maxOpsPerDay")} />
-                        <span className="field-unit">trades</span>
+                        <span className="field-unit">{t("wallet.unitDayTrades")}</span>
                       </span>
                     </label>
                     <label className="field">
-                      <span className="field-label">auto-expire the agent after</span>
+                      <span className="field-label">{t("wallet.capExpiry")}</span>
                       <span className="field-input">
                         <input type="text" inputMode="numeric" value={capShown("expiryDays")} onChange={set("expiryDays")} />
-                        <span className="field-unit">days</span>
+                        <span className="field-unit">{t("wallet.unitDays")}</span>
                       </span>
                     </label>
                     <label className="field">
-                      <span className="field-label">drawdown limit</span>
+                      <span className="field-label">{t("wallet.capDrawdownLabel")}</span>
                       <span className="field-input">
                         <input type="text" inputMode="numeric" value={capShown("maxDrawdownPct")}
                           onChange={set("maxDrawdownPct")} disabled={renewing}
@@ -2398,12 +2362,11 @@ export default function GrantPage() {
                         <span className="field-unit">%</span>
                       </span>
                       <small>
-                        New buys pause when drawdown is at or above this percentage below the account&apos;s recorded peak. Selling remains allowed by this limit.
-                        Raising it allows a larger loss before buys pause; it does not recover losses or reset the peak. Choose a whole percentage from 1 to 50.
+                        {t("wallet.drawdownSmall")}
                       </small>
                     </label>
                   </div>
-                  {capsInputInvalid && <p className="grant-cap-error" role="alert">{capError || "Enter valid limits before signing."}</p>}
+                  {capsInputInvalid && <p className="grant-cap-error" role="alert">{capError || t("wallet.enterValid")}</p>}
                   {/*
                     MOVING A KEY BETWEEN CHAINS, as a first-class action.
 
@@ -2435,26 +2398,24 @@ export default function GrantPage() {
                       <span>
                         {grant.chainId === MAINNET ? (
                           <>
-                            Move this key to <b>the testnet ({TESTNET})</b> — it will stop being
-                            able to trade
+                            {t("wallet.moveToTestnet", { id: TESTNET })}
                             {session?.hosted
-                              ? ", and on this service it cannot be used for anything: your agent trades Robinhood Chain. Turn Paper on in Settings instead."
+                              ? t("wallet.moveTestnetHosted")
                               : "."}
                           </>
                         ) : (
-                          <>Move this key to <b>Robinhood Chain ({MAINNET})</b> — the network your agent trades on.</>
+                          <>{t("wallet.moveToMainnet", { id: MAINNET })}</>
                         )}
                       </span>
                     </label>
                   </div>
                   {chainId === MAINNET && grant.chainId !== MAINNET && (
                     <div className="mainnet-warning" style={{ marginTop: 10 }}>
-                      <b>This uses real funds.</b> Anyone with access to the keys saved in this browser can control your funds. Keep your recovery key private.
+                      <b>{t("wallet.realFunds")}</b> {t("wallet.realFundsBody")}
                       <br />
                       <br />
-                      Your account address does not change, so anything already sitting at{" "}
-                      <span className="mono">{short(grant.smartAccount)}</span> on mainnet stays
-                      there. Testnet balances do not transfer to mainnet.
+                      {t("wallet.addrStaysA")}{" "}
+                      <span className="mono">{short(grant.smartAccount)}</span> {t("wallet.addrStaysB")}
                       <label className="ack-row" style={{ marginTop: 10 }}>
                         <input
                           type="checkbox"
@@ -2462,7 +2423,7 @@ export default function GrantPage() {
                           onChange={(e) => setMainnetAck(e.target.checked)}
                         />
                         <span>
-                          I understand — real funds, a recovery key stored in this browser can bypass every cap. I must keep it private.
+                          {t("wallet.mainnetAckRenew")}
                         </span>
                       </label>
                     </div>
@@ -2475,7 +2436,7 @@ export default function GrantPage() {
                   */}
                   {anyChange && (
                     <p className="field-lead" style={{ marginTop: 10 }}>
-                      Signing now also changes: {allChanges.join(" · ")}.
+                      {t("wallet.signingChanges", { changes: allChanges.join(" · ") })}
                     </p>
                   )}
                   {/*
@@ -2485,19 +2446,19 @@ export default function GrantPage() {
                     under the checkbox that enables it.
                   */}
                   <div className="grant-note" data-renewal-funding style={{ marginTop: 12 }}>
-                    <b>ETH for revocation fees</b>
-                    <p>Before continuing, fund this same account address on {chainId !== grant.chainId ? "each network below" : "this network"}:</p>
+                    <b>{t("wallet.revokeFeesTitle")}</b>
+                    <p>{chainId !== grant.chainId ? t("wallet.fundEach") : t("wallet.fundOne")}</p>
                     <code style={{ display: "block", overflowWrap: "anywhere" }}>{grant.smartAccount}</code>
-                    <CopyBtn value={grant.smartAccount} label="copy revocation funding address" />
+                    <CopyBtn value={grant.smartAccount} label={t("wallet.copyRevocationAddress")} />
                     <ul>
                       {[grant.chainId, ...(chainId !== grant.chainId ? [chainId] : [])].map(network => <li key={network}>
-                        <b>{network === MAINNET ? "Robinhood Chain" : "Robinhood Chain testnet"} ({network})</b>: send {network === TESTNET ? "testnet ETH" : "ETH"} for network fees.
+                        {t("wallet.revokeNetLine", { chain: network === MAINNET ? t("wallet.chainNameMain") : t("wallet.chainNameTest"), id: network, asset: network === TESTNET ? t("wallet.assetTestEth") : t("wallet.assetEth") })}
                       </li>)}
                     </ul>
-                    {(grant.chainId === TESTNET || chainId === TESTNET) && <p><a href={FAUCET_URL} target="_blank" rel="noreferrer">Get testnet ETH from the faucet ↗</a>, then send it to the account above on testnet.</p>}
-                    <p>Balances do not move between networks. Revocation needs ETH even when trading gas is sponsored; an empty account on the destination network also needs ETH. If you see AA21 or an insufficient-funds error, fund the named network and retry here.</p>
+                    {(grant.chainId === TESTNET || chainId === TESTNET) && <p><a href={FAUCET_URL} target="_blank" rel="noreferrer">{t("wallet.faucetLink")}</a>{t("wallet.faucetAfter")}</p>}
+                    <p>{t("wallet.balancesNote")}</p>
                   </div>
-                  <label className="ack-row" style={{ marginTop: 12 }}><input type="checkbox" checked={renewalAck} onChange={e => setRenewalAck(e.target.checked)} /><span>I authorize revoking earlier permissions on-chain before signing the replacement and understand network fees apply.</span></label>
+                  <label className="ack-row" style={{ marginTop: 12 }}><input type="checkbox" checked={renewalAck} onChange={e => setRenewalAck(e.target.checked)} /><span>{t("wallet.renewAck")}</span></label>
                   <button
                     className="grant-btn"
                     style={{ marginTop: 10, width: "100%" }}
@@ -2505,15 +2466,15 @@ export default function GrantPage() {
                     disabled={renewing || securityBusy || !renewalAck || capsInputInvalid || (chainId === MAINNET && grant.chainId !== MAINNET && !mainnetAck)}
                   >
                     {renewing
-                      ? "re-signing…"
+                      ? t("wallet.resigning")
                       : chainId !== grant.chainId
                         ? chainId === MAINNET
-                          ? "move to Robinhood Chain & re-sign"
-                          : "move to the testnet & re-sign"
-                        : "revoke earlier permissions & re-sign"}
+                          ? t("wallet.moveMainnetSign")
+                          : t("wallet.moveTestnetSign")
+                        : t("wallet.revokeResign")}
                   </button>
                   </fieldset>
-                  {renewing && <p className="field-lead" role="status">{status ?? "re-signing…"}</p>}
+                  {renewing && <p className="field-lead" role="status">{status ?? t("wallet.resigning")}</p>}
                   {/* A preflight refusal leaves the prior permission unchanged,
                       including any earlier pending revocation/recovery state. */}
                   {error && (
@@ -2521,10 +2482,8 @@ export default function GrantPage() {
                       {error}
                       {isWallTooWide(error) && (
                         <p>
-                          Lower spending limits do not shrink the permission list. {" "}
-                          <a href="/settings">Review custom tokens</a> and follow the changes described above.
-                          If it is too large even without custom tokens, the selected trading routes
-                          need a narrower permission; contact support before changing those routes.
+                          {t("wallet.wallNoShrink")} {" "}
+                          <a href="/settings">{t("wallet.reviewTokens")}</a> {t("wallet.wallFollow")}
                         </p>
                       )}
                     </div>
@@ -2541,16 +2500,11 @@ export default function GrantPage() {
                       panel used to say to the entire Privy cohort. */}
                   {isPrivyOwned(grant) ? (
                     <>
-                      Re-signing {short(grant.smartAccount)} needs the login that owns it. This
-                      agent is owned by a Privy embedded wallet — there is no key to paste, which
-                      is the point of it — so sign in as that account and this control comes back.
+                      {t("wallet.privyResign", { account: short(grant.smartAccount) })}
                     </>
                   ) : (
                     <>
-                      This browser does not hold the owner key for {short(grant.smartAccount)}, and
-                      re-signing needs it. Use <b>switch to another wallet</b> below and paste the
-                      key in, or run <code>merrymen recover</code> to sweep the funds somewhere you
-                      control.
+                      {t("wallet.noKeyBody", { account: short(grant.smartAccount) })} {t("wallet.noKeyFix", { action: t("wallet.switchWallet"), command: "merrymen recover" })}
                     </>
                   )}
                 </p>
@@ -2559,11 +2513,11 @@ export default function GrantPage() {
             </div>
 
             {!renewed && <div className="grant-actions">
-              <Link href="/chat" className="grant-btn" style={{ textAlign: "center", textDecoration: "none" }}>View agent status</Link>
+              <Link href="/chat" className="grant-btn" style={{ textAlign: "center", textDecoration: "none" }}>{t("wallet.viewStatus")}</Link>
             </div>}
             <details className="grant-wallet-options">
-              <summary>More wallet options</summary>
-              <p>Switch wallets or stop using this permission. Neither option is needed to finish renewing. Discarding stops this service but does not revoke copied session keys on-chain.</p>
+              <summary>{t("wallet.moreOptions")}</summary>
+              <p>{t("wallet.moreOptionsBody")}</p>
               <div className="grant-actions">
               <button
                 className="copy-btn"
@@ -2576,10 +2530,10 @@ export default function GrantPage() {
                   setError(null);
                 }}
               >
-                switch to another wallet
+                {t("wallet.switchWallet")}
               </button>
               <button className="btn-kill" style={{ padding: "10px 16px" }} onClick={() => void discard()} disabled={discarding || renewing || securityBusy}>
-                {discarding ? "discarding…" : "discard & start over"}
+                {discarding ? t("wallet.discarding") : t("wallet.discardStartOver")}
               </button>
               </div>
             </details>

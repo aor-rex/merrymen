@@ -31,6 +31,7 @@ import { holdersFigure, holdersList } from "../token-holders";
 import { useWatchlist } from "../watchlist";
 import { useTokenPage } from "../token-page-read";
 import { shortDateTime } from "@/lib/format";
+import { useT } from "@/lib/i18n";
 
 const WINDOWS: WindowId[] = ["1H", "4H", "1D", "5D", "1M", "ALL"];
 
@@ -47,6 +48,7 @@ export function Token({
   onBack: () => void;
   onProfile: (slug: string) => void;
 }) {
+  const t = useT();
   const [span, setSpan] = useState<WindowId>("1D");
   const [kind, setKind] = useState<ChartKind>("candle");
   const [bars, setBars] = useState<Bar[]>([]);
@@ -123,16 +125,16 @@ export function Token({
     void navigator.clipboard.writeText(token.id).then(() => {
       setCopied(true);
       globalThis.setTimeout(() => setCopied(false), 1200);
-    }).catch(() => setActionMessage("Could not copy the address. Select it to copy manually."));
+    }).catch(() => setActionMessage(t("token.copyFailed")));
   };
 
   const share = () => {
     const url = location.href;
     if (navigator.share) {
-      void navigator.share({ title: token.symbol, text: token.name, url }).catch((error) => { if(error.name !== "AbortError") setActionMessage("Could not share this token. Copy the page address instead."); });
+      void navigator.share({ title: token.symbol, text: token.name, url }).catch((error) => { if(error.name !== "AbortError") setActionMessage(t("token.shareFailed")); });
       return;
     }
-    void navigator.clipboard.writeText(url).then(()=>setActionMessage("Link copied.")).catch(()=>setActionMessage("Could not copy the link. Copy the page address instead."));
+    void navigator.clipboard.writeText(url).then(()=>setActionMessage(t("token.linkCopied"))).catch(()=>setActionMessage(t("token.linkFailed")));
   };
 
   return (
@@ -156,7 +158,7 @@ export function Token({
             <p className="token-sub">
               <span>{token.name}</span>
               <button type="button" onClick={copyId}>
-                {copied ? "Copied" : shortId(token.id)}
+                {copied ? t("token.copied") : shortId(token.id)}
               </button>
             </p>
           </div>
@@ -167,7 +169,7 @@ export function Token({
             className={starred ? "on" : ""}
             aria-label="Watch"
             aria-pressed={starred}
-            onClick={() => {try {watchlist.toggle(token.id);} catch {setActionMessage("Could not save your watchlist on this device.");}}}
+            onClick={() => {try {watchlist.toggle(token.id);} catch {setActionMessage(t("token.watchlistFailed"));}}}
           >
             <StarIcon on={starred} />
           </button>
@@ -196,7 +198,7 @@ export function Token({
         {token.fdvUsd != null && (
           <div className="token-mc">
             <b>{compactUsd(token.fdvUsd)}</b>
-            <span>Fully diluted value</span>
+            <span>{t("token.fdv")}</span>
           </div>
         )}
       </div>
@@ -205,10 +207,10 @@ export function Token({
         <div>
           <span>
             {token.priceUsd == null
-              ? "Chart close"
+              ? t("token.chartClose")
               : token.priceSource === "robinhood"
-                ? "Quote midpoint"
-                : "Token price"}
+                ? t("token.quoteMid")
+                : t("token.tokenPrice")}
           </span>
           <strong title={quoteTitle(token)}>
             {/* The desktop's copy of the price above, which is hidden there.
@@ -219,7 +221,7 @@ export function Token({
           </strong>
         </div>
         <div>
-          <span>{span} change</span>
+          <span>{t("token.changeWindow", { span })}</span>
           {/* The TEXT of the change gets the third colour. `down` above is a
               boolean the chart needs; a percentage nobody measured is neither
               up nor down, and printing "—" in green is the bug live.ts documents
@@ -227,7 +229,7 @@ export function Token({
           <strong className={deltaClass(winPct)}>{pctPts(winPct)}</strong>
         </div>
         <div>
-          <span>{span} high</span>
+          <span>{t("token.highWindow", { span })}</span>
           <strong>
             {coinPrice(
               bars.length ? Math.max(...bars.map((b) => b.high)) : null,
@@ -235,7 +237,7 @@ export function Token({
           </strong>
         </div>
         <div>
-          <span>{span} low</span>
+          <span>{t("token.lowWindow", { span })}</span>
           <strong>
             {coinPrice(
               bars.length ? Math.min(...bars.map((b) => b.low)) : null,
@@ -243,7 +245,7 @@ export function Token({
           </strong>
         </div>
         <div>
-          <span>Agents holding</span>
+          <span>{t("token.agentsHolding")}</span>
           {/* Every agent holding it, the private ones included — not only the public rows below. */}
           <strong>{holdersFigure(holdersRead, holderCoverage)}</strong>
         </div>
@@ -252,7 +254,7 @@ export function Token({
           {bars.length === 0 ? (
             <p className="meta" role="status">
               {loading
-                ? "Loading the chart…"
+                ? t("token.loadingChart")
                 : /**
                    * ONE SENTENCE PER STATE. This was a single line for all four
                    * — "Price history unavailable. Try another timeframe." — and
@@ -263,15 +265,15 @@ export function Token({
                    */
                   chart.state === "refused"
                   ? chart.reason === "rate-limited"
-                    ? "We're being rate-limited by the price index right now. That's our outage, not this token's — the chart should be back within a minute."
+                    ? t("token.rateLimited")
                     : chart.reason === "unreadable"
-                      ? "The price index answered with something we couldn't read. That's ours to fix."
-                      : "We couldn't reach the price index just now. That's our outage, not this token's."
+                      ? t("token.unreadableIndex")
+                      : t("token.indexDown")
                   : chart.state === "mismatch"
-                    ? `This pool's price history is quoted for the other side of the pair, so we won't chart it as ${token.symbol}.`
+                    ? t("token.mismatch", { symbol: token.symbol })
                     : span === "1H" || span === "4H"
-                      ? "Nothing has traded in this window. Try a longer timeframe."
-                      : "No price history has printed on this pool yet."}
+                      ? t("token.emptyWindow")
+                      : t("token.noHistory")}
             </p>
           ) : (
             <>
@@ -281,7 +283,7 @@ export function Token({
                    429 is worse — but unsaid it trades an honest blank for a
                    quiet lie about the price. */
                 <p className="meta" role="status">
-                  Showing the last prices we could read — the index isn&apos;t answering right now.
+                  {t("token.staleChart")}
                 </p>
               )}
               {kind === "line" ? (
@@ -334,8 +336,8 @@ export function Token({
               <button
                 type="button"
                 className="chart-reset"
-                aria-label="Reset chart view"
-                title="Reset chart view"
+                aria-label={t("token.resetView")}
+                title={t("token.resetView")}
                 onClick={() => setChartRevision((value) => value + 1)}
               >
                 <RotateCcw size={15} />
@@ -364,16 +366,16 @@ export function Token({
 
       <section className="held-sec">
         {holderError && <p role="status">{holderError}</p>}
-        {holdersRead === "failed" && <button type="button" onClick={()=>setHoldersAttempt(n=>n+1)}>Try again</button>}
-        <h3>Holders{seats.length ? ` (${seats.length})` : ""}</h3>
-        {holderCoverage && <p className="meta">{holderCoverage.published} of {holderCoverage.total} agents publish their positions.</p>}
-        {symbolClash && <p className="meta">Token symbols disagree, so agent reasoning cannot be matched to this token.</p>}
+        {holdersRead === "failed" && <button type="button" onClick={()=>setHoldersAttempt(n=>n+1)}>{t("token.tryAgain")}</button>}
+        <h3>{seats.length ? t("token.holdersCount", { count: seats.length }) : t("token.holders")}</h3>
+        {holderCoverage && <p className="meta">{t("token.coverage", { published: holderCoverage.published, total: holderCoverage.total })}</p>}
+        {symbolClash && <p className="meta">{t("token.clash")}</p>}
         {seats.length > 0 && (
           <div className="holder-table-wrap">
             <table className="holder-table">
               <thead>
                 <tr>
-                  <th>Agent</th>
+                  <th>{t("token.colAgent")}</th>
                   <th
                     aria-sort={
                       sortBy === "position"
@@ -384,7 +386,7 @@ export function Token({
                     }
                   >
                     <button onClick={() => sortHolders("position")}>
-                      Position{" "}
+                      {t("token.colPosition")}{" "}
                       {sortBy === "position" && (
                         <ArrowDown
                           size={12}
@@ -407,7 +409,7 @@ export function Token({
                     }
                   >
                     <button onClick={() => sortHolders("return")}>
-                      Return{" "}
+                      {t("token.colReturn")}{" "}
                       {sortBy === "return" && (
                         <ArrowDown
                           size={12}
@@ -420,8 +422,8 @@ export function Token({
                       )}
                     </button>
                   </th>
-                  <th>Avg. entry</th>
-                  <th>Thesis</th>
+                  <th>{t("token.colAvg")}</th>
+                  <th>{t("token.colThesis")}</th>
                 </tr>
               </thead>
               <tbody>
@@ -454,8 +456,8 @@ export function Token({
           </div>
         )}
         {seats.length === 0 ? (
-          holders === "loading" ? <SkeletonRows rows={2} label="Loading holders"/>
-            : holders === "empty" && <Empty compact kind="positions" title="No public agent holdings reported yet."/>
+          holders === "loading" ? <SkeletonRows rows={2} label={t("token.loadingHolders")}/>
+            : holders === "empty" && <Empty compact kind="positions" title={t("token.noHoldings")}/>
         ) : (
           <div className="helds">
             {seats.map((s) => (
@@ -475,6 +477,7 @@ function Held({
   seat: Seat;
   onProfile: (slug: string) => void;
 }) {
+  const t = useT();
   return (
     <button type="button" className="held" onClick={() => onProfile(seat.slug)}>
       <Face name={seat.name} slug={seat.slug} />
@@ -488,7 +491,7 @@ function Held({
         </div>
         <div className="held-sub">
           {seat.avgEntry > 0 ? (
-            <span>Avg. {coinPrice(seat.avgEntry || null)}</span>
+            <span>{t("token.avgEntry", { price: coinPrice(seat.avgEntry || null) })}</span>
           ) : (
             <span />
           )}

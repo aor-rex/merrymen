@@ -36,6 +36,9 @@ const asTrade = (b: Beat | undefined): Extract<Beat, { kind: "trade" }> => {
 import { lastLine, ledgerSeconds, readStateOf, seedLive, tradeOutcome, type LiveAgent, type Thesis } from "./live";
 import { stampOf, whyLine } from "./why";
 import { entryCaveat } from "./bars";
+import { EN } from "../lib/messages/en";
+
+const EN_TEXT = Object.values(EN).join("\n");
 
 const at = (p: string) => readFileSync(new URL(p, import.meta.url), "utf8");
 /** Source with comments removed — these files describe at length what they will not do. */
@@ -284,16 +287,20 @@ describe("an unreadable ledger is not a quiet one", () => {
   it("INVARIANT: the two lists that make claims about the world branch on the read", () => {
     // "Quiet." and "Nobody has traded yet." are affirmative statements. Both
     // shipped reachable from an empty seed and from a database outage.
-    for (const [file, claim] of [
-      ["./screens/Feed.tsx", "Quiet."],
-      ["./screens/Board.tsx", "Nobody has traded yet."],
+    // i18n: the claims live in the catalogue now; pin the key at the call
+    // site and the wording in EN.
+    for (const [file, key, claim] of [
+      ["./screens/Feed.tsx", "feed.quiet", "Quiet."],
+      ["./screens/Board.tsx", "board.emptyNoTrades", "Nobody has traded yet."],
     ] as const) {
       const src = at(file);
-      const i = src.indexOf(claim);
-      assert.ok(i > 0, `${file} no longer contains ${claim} — update this test with it`);
+      const i = src.indexOf(`t("${key}")`);
+      assert.ok(i > 0, `${file} no longer renders ${key} — update this test with it`);
       const around = src.slice(Math.max(0, i - 500), i + 200);
       assert.match(around, /ReadEmpty/, `${file} must render ${claim} only through ReadEmpty`);
     }
+    assert.match(EN_TEXT, /Quiet\./, "the feed claim survives in EN");
+    assert.match(EN_TEXT, /Nobody has traded yet\./, "the board claim survives in EN");
   });
 
   it("INVARIANT: ReadEmpty cannot say the quiet thing without an `ok` read", () => {
@@ -384,10 +391,14 @@ describe("must-have before a public UI", () => {
     // simulated fills. read-agent.ts keeps the counters apart on purpose —
     // folding them would re-arm the +2643.3% incident — so both must show.
     const src = at("./screens/Profile.tsx");
-    const landed = src.indexOf("Completed operations");
+    // i18n: the labels live in the catalogue now; pin the keys at the call
+    // site and the wording in EN.
+    const landed = src.indexOf('t("profile.completedOps")');
     const paper = src.indexOf("filledPaper");
     assert.ok(landed > 0 && paper > 0, "both counters must be rendered");
-    assert.match(src, /paper trades/, "and the paper one says what it is");
+    assert.match(src, /t\("profile\.paperCount"/, "and the paper one says what it is");
+    assert.match(EN_TEXT, /Completed operations/, "the landed counter wording survives in EN");
+    assert.match(EN_TEXT, /\{count\} paper trades/, "the paper counter wording survives in EN");
   });
 
   it("INVARIANT: the price axis cannot render a real price as $0.00", () => {
@@ -438,9 +449,12 @@ describe("a screen may not promise what it can never show", () => {
   });
 
   it("and they print something they can actually know", () => {
-    // `landed` and `filledPaper` are on the wire for every agent.
-    assert.match(code(at("./Desktop.tsx")), /tradeLine\(a\)/);
-    assert.match(code(at("./screens/Board.tsx")), /tradeLine\(a\)/);
+    // `landed` and `filledPaper` are on the wire for every agent. The line
+    // threads `t` now that the counts render through the catalogue.
+    assert.match(code(at("./Desktop.tsx")), /tradeLine\(a, t\)/);
+    assert.match(code(at("./screens/Board.tsx")), /tradeLine\(a, t\)/);
+    assert.match(EN_TEXT, /\{count\} on paper/, "the paper-only count wording survives in EN");
+    assert.match(EN_TEXT, /No trades yet/, "the empty count wording survives in EN");
   });
 
   it("A SIMULATED FILL IS NOT A TRADE, in the one line that counts them", async () => {

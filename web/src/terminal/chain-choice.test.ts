@@ -112,18 +112,24 @@ describe("the chain a hosted owner cannot use says so before they pick it", () =
   it("THE PRACTICE CARD WARNS ON THE HOSTED SERVICE", () => {
     // The worker trades Robinhood Chain, so a hosted key signed for the sandbox
     // cannot trade at all. That was only discoverable afterwards, from the chat.
-    assert.match(SRC, /Not for this service — your agent trades Robinhood Chain/);
+    // i18n: the sentence lives in the catalogue now; pin the key at the call
+    // site and the wording in EN.
+    assert.match(SRC, /t\("wallet\.testnetHosted"\)/);
+    assert.match(EN["wallet.testnetHosted"], /Not for this service — your agent trades Robinhood Chain/);
   });
 
   it("AND SO DOES THE MOVE-TO-TESTNET CHECKBOX", () => {
-    assert.match(SRC, /on this service it cannot be used for anything/);
+    assert.match(SRC, /t\("wallet\.moveTestnetHosted"\)/);
+    assert.match(EN["wallet.moveTestnetHosted"], /on this service it cannot be used for anything/);
   });
 
   it("and both point at the thing that DOES give practice", () => {
     // Paper trading is a setting on the same chain, needs no signature, and is
     // what the owner meant. Naming it is the difference between a refusal and
     // an answer.
-    assert.equal((SRC.match(/paper trading/gi) ?? []).length >= 2, true);
+    for (const key of ["wallet.testnetHosted", "wallet.moveTestnetHosted"] as const) {
+      assert.match(EN[key], /[Tt]urn Paper on in Settings instead/, `${key} must name the real practice path`);
+    }
   });
 });
 

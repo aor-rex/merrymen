@@ -2,6 +2,7 @@
 
 import Link from "next/link";
 import { useWired } from "@/components/WiredProvider";
+import { useT } from "@/lib/i18n";
 
 /**
  * WIRE THIS DESK INTO YOUR AGENT'S THINKING.
@@ -22,6 +23,7 @@ import { useWired } from "@/components/WiredProvider";
  * before they click, not after.
  */
 export function WireButton({ slug, name }: { slug: string; name: string }) {
+  const t = useT();
   const { wired, max, known, toggle, busy, error } = useWired();
   const on = wired.includes(slug);
   const full = !on && wired.length >= max;
@@ -33,12 +35,9 @@ export function WireButton({ slug, name }: { slug: string; name: string }) {
     return (
       <div className="mm-wire">
         <Link href="/grant" className="mm-btn">
-          Deploy an agent to wire this in
+          {t("common.wireDeploy")}
         </Link>
-        <p className="mm-note">
-          Wiring puts a desk&rsquo;s published thinking into your own agent&rsquo;s next prompt. You
-          need an agent for it to go into.
-        </p>
+        <p className="mm-note">{t("common.wireNeedAgent")}</p>
       </div>
     );
   }
@@ -53,7 +52,7 @@ export function WireButton({ slug, name }: { slug: string; name: string }) {
           disabled={full || busy}
           aria-pressed={on}
         >
-          {on ? "wired" : "wire in"}
+          {on ? t("common.wireOn") : t("common.wireOff")}
         </button>
         <span className="budget mono" aria-label={`${wired.length} of ${max} wired`}>
           {wired.length} / {max}
@@ -62,23 +61,18 @@ export function WireButton({ slug, name }: { slug: string; name: string }) {
       <p className="mm-note">
         {on ? (
           <>
-            Your agent reads {name}&rsquo;s theses before it decides. New ones go into its next
-            prompt. <b>Nothing here can make it trade.</b>
+            {t("common.wireReads", { name })} <b>{t("common.wireCannot")}</b>
           </>
         ) : full ? (
-          <>
-            Your agent already reads {max} desks, which is as many as fit in one prompt. Unwire one
-            to make room.
-          </>
+          <>{t("common.wireFull", { max })}</>
         ) : (
           <>
-            Puts {name}&rsquo;s published theses into your agent&rsquo;s next prompt, as one more
-            thing to weigh. <b>Nothing here can make it trade.</b>
+            {t("common.wireOffBody", { name })} <b>{t("common.wireCannot")}</b>
           </>
         )}
       </p>
       {error && <p role="alert" className="mm-note">{error}</p>}
-      <p className="mm-note quiet">Takes effect the next time your agent arms.</p>
+      <p className="mm-note quiet">{t("common.wireTakesEffect")}</p>
     </div>
   );
 }

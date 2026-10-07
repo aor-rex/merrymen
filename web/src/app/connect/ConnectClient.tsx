@@ -11,6 +11,8 @@ import {
 import { CreateAgent } from "@/terminal/screens/CreateAgent";
 import { fetchAccountForSession, readAccountForSession } from "@/terminal/account-session";
 import { loadGrant, type Grant } from "@/lib/session";
+import { useT } from "@/lib/i18n";
+import type { MessageKey } from "@/lib/messages/en";
 
 const TOKEN_STORAGE = "merrymen.partner-connect";
 
@@ -24,9 +26,9 @@ interface Connection {
   has_agent: boolean;
 }
 
-const ACCESS: Record<string, { title: string; detail: string }> = {
-  "read:agents": { title: "Read your agent’s status", detail: "See its current setup and whether it is ready to work." },
-  "chat:agents": { title: "Talk with your agent", detail: "Send messages and receive answers that may include your private portfolio and trade information." },
+const ACCESS: Record<string, { title: MessageKey; detail: MessageKey }> = {
+  "read:agents": { title: "connect.accessReadTitle", detail: "connect.accessReadDetail" },
+  "chat:agents": { title: "connect.accessChatTitle", detail: "connect.accessChatDetail" },
 };
 
 async function connectRequest<T>(body: Record<string, string>): Promise<T> {
@@ -42,7 +44,7 @@ async function connectRequest<T>(body: Record<string, string>): Promise<T> {
   const data = await response.json();
   if (!response.ok) {
     const message = typeof data.error === "string" ? data.error : data.error?.message;
-    throw new Error(message || `Could not complete this request (${response.status}). Try again.`);
+    throw new Error(message || `CONNECT_ERR:${response.status}`);
   }
   return data as T;
 }
@@ -54,7 +56,7 @@ async function readAccount(): Promise<AccountState> {
     () => requestJson<AccountState["status"]>("/api/grants"),
   );
   if (result.kind === "ready") return result.account;
-  if (result.kind === "changed") throw new Error("Your sign-in changed while loading. Try again.");
+  if (result.kind === "changed") throw new Error("CONNECT_SIGN_CHANGED");
   throw result.error;
 }
 
@@ -66,7 +68,20 @@ function needsBackup(account: AccountState): boolean {
   return localStorage.getItem(`merrymen.backup.${local.smartAccount.toLowerCase()}`) !== "1";
 }
 
+// Module-level request helpers throw sentinels, not sentences: they have no
+// hook, and a server refusal must pass through verbatim rather than be
+// replaced. Anything unrecognised is a server message and stays as-is.
+function xlate(t: ReturnType<typeof useT>, message: string): string {
+  const req = /^CONNECT_ERR:(\d+)$/.exec(message);
+  if (req) return t("connect.errRequest", { status: req[1]! });
+  if (message === "CONNECT_SIGN_CHANGED") return t("connect.errSignChanged");
+  if (message === "CONNECT_CONFIRM") return t("connect.errConfirm");
+  if (message === "CONNECT_CHANGED") return t("connect.errChanged");
+  return message;
+}
+
 export function ConnectClient() {
+  const t = useT();
   const [token, setToken] = useState<string | null>(null);
   const [connection, setConnection] = useState<Connection | null>(null);
   const [account, setAccount] = useState<AccountState | null>(null);
@@ -95,7 +110,7 @@ export function ConnectClient() {
     if (!value || value.length > 4096) {
       setToken("");
       setLoading(false);
-      setError("Open the connection link from the app you want to use with Merrymen.");
+      setError(t("connect.errNoLink"));
       return;
     }
     setToken(value);
@@ -121,12 +136,12 @@ export function ConnectClient() {
       if (version === requestVersion.current) {
         setConnection(null);
         setAccount(null);
-        setError(cause instanceof Error ? cause.message : "Could not load this connection. Try again.");
+        setError(cause instanceof Error ? xlate(t, cause.message) : t("connect.errLoad"));
       }
     } finally {
       if (version === requestVersion.current) setLoading(false);
     }
-  }, [token]);
+  }, [token, t]);
 
   useEffect(() => {
     if (token) void refresh();
@@ -140,7 +155,7 @@ export function ConnectClient() {
     }).catch(() => {
       if (version === accountReadVersion.current) {
         setAccount(null);
-        setError("Could not refresh your agent. Try again before connecting the app.");
+        setError(t("connect.errRefresh"));
       }
     });
   }, []);
@@ -158,16 +173,16 @@ export function ConnectClient() {
     setBusy(true);
     setError("");
     try {
-      if (!account?.session.hosted || !account.session.address) throw new Error("Confirm your sign-in again before connecting this app.");
+      if (!account?.session.hosted || !account.session.address) throw new Error("CONNECT_CONFIRM");
       const confirmed = await fetchAccountForSession(account.session);
       if (confirmed.kind !== "ready" || !confirmed.account.status.exists || !confirmed.account.session.address) {
         setAccount(null);
-        throw new Error("Your account changed. Reload it before connecting this app.");
+        throw new Error("CONNECT_CHANGED");
       }
       await connectRequest<{ connected: true; id: string }>({ action: "connect", token, expectedTenant: confirmed.account.session.address });
       setConnection({ ...connection, status: "linked" });
     } catch (cause) {
-      setError(cause instanceof Error ? cause.message : "Could not connect this app. Try again.");
+      setError(cause instanceof Error ? xlate(t, cause.message) : t("connect.errConnect"));
     } finally {
       setBusy(false);
     }
@@ -183,7 +198,7 @@ export function ConnectClient() {
       setRemoveConfirm(false);
       try { sessionStorage.removeItem(TOKEN_STORAGE); } catch { /* Optional tab storage. */ }
     } catch (cause) {
-      setError(cause instanceof Error ? cause.message : "Could not disconnect this app. Try again.");
+      setError(cause instanceof Error ? xlate(t, cause.message) : t("connect.errDisconnect"));
     } finally {
       setBusy(false);
     }
@@ -199,7 +214,7 @@ export function ConnectClient() {
     void refresh(true);
   }
 
-  const appName = connection?.partner_name || "This app";
+  const appName = connection?.partner_name || t("connect.appFallbackPartner");
   const pending = connection?.status === "pending";
   const needsRenewal = pending && connection.signed_in && !connection.has_agent && account?.status.exists;
   const setup = pending && connection.signed_in && showSetup && !needsRenewal;
@@ -209,89 +224,89 @@ export function ConnectClient() {
     <div className="terminal-host partner-connect">
       <header className="connect-header">
         <a href="/" className="connect-brand" aria-label="Merrymen home">merrymen<span aria-hidden>↗</span></a>
-        <span className="connect-header-label"><ShieldCheck size={14} aria-hidden /> App connection</span>
+        <span className="connect-header-label"><ShieldCheck size={14} aria-hidden /> {t("connect.headerLabel")}</span>
       </header>
       <main className="connect-main">
         <div className="connect-context">
-          <span className="connect-eyebrow">YOUR AGENT, IN YOUR APPS</span>
-          <h1>{connection?.status === "linked" ? "You’re connected." : connection?.status === "revoked" ? "Access is disconnected." : <>Bring your agent<br />along.</>}</h1>
+          <span className="connect-eyebrow">{t("connect.eyebrow")}</span>
+          <h1>{connection?.status === "linked" ? t("connect.linkedTitle") : connection?.status === "revoked" ? t("connect.revokedTitle") : <>{t("connect.pendingTitleA")}<br />{t("connect.pendingTitleB")}</>}</h1>
           <p>{connection?.status === "linked"
-            ? `${appName} can now use the access you approved. Return to that app to continue.`
+            ? t("connect.linkedBody", { app: appName })
             : connection?.status === "revoked"
-              ? `${appName} no longer has access through this connection. Your Merrymen agent remains yours.`
+              ? t("connect.revokedBody", { app: appName })
               : connection
-                ? `${appName} wants to connect with your Merrymen agent. Review the access, then decide.`
-                : "Connect an app to your agent with access you choose."}</p>
+                ? t("connect.pendingBody", { app: appName })
+                : t("connect.noConnBody")}</p>
           {connection && connection.status !== "revoked" && (
             <ol className="connect-progress" aria-label="Connection progress">
-              {["Sign in", "Your agent", "Allow access"].map((label, index) => (
+              {[t("connect.stepSignIn"), t("connect.stepAgent"), t("connect.stepAllow")].map((label, index) => (
                 <li key={label} className={step >= index ? "active" : ""} aria-current={step === index ? "step" : undefined}>
                   <span>{step > index ? <Check size={13} aria-hidden /> : index + 1}</span>{label}
                 </li>
               ))}
             </ol>
           )}
-          {connection && <div className="connect-app"><span className="connect-app-icon"><Link2 size={20} aria-hidden /></span><div><strong>{appName}</strong><span>{connection.name || "Merrymen connection"}</span></div></div>}
+          {connection && <div className="connect-app"><span className="connect-app-icon"><Link2 size={20} aria-hidden /></span><div><strong>{appName}</strong><span>{connection.name || t("connect.appFallback")}</span></div></div>}
         </div>
 
         <section className={`connect-panel${setup ? " connect-panel-setup" : ""}`} aria-label="Connect your agent" aria-busy={loading || busy}>
-          {!connection && loading && <div className="connect-wait" role="status"><span className="connect-spinner" aria-hidden />Checking the connection…</div>}
-          {!connection && !loading && <><h2>Start from your app.</h2><p>Ask the app for a new Merrymen connection link, then open it in this browser.</p></>}
+          {!connection && loading && <div className="connect-wait" role="status"><span className="connect-spinner" aria-hidden />{t("connect.checking")}</div>}
+          {!connection && !loading && <><h2>{t("connect.startTitle")}</h2><p>{t("connect.startBody")}</p></>}
 
           {pending && !connection.signed_in && <>
-            <span className="connect-step-label">01 · SIGN IN</span>
-            <h2>Make it your agent.</h2>
-            <p>Sign in to choose your existing Merrymen agent or set up a new one. You’ll approve {appName}’s access afterward.</p>
+            <span className="connect-step-label">{t("connect.s1")}</span>
+            <h2>{t("connect.signinTitle")}</h2>
+            <p>{t("connect.signinBody", { app: appName })}</p>
             <SignIn onDone={onSignedIn} />
           </>}
 
           {needsRenewal && <>
-            <span className="connect-step-label">02 · YOUR AGENT</span>
-            <h2>Renew your agent’s permission.</h2>
-            <p>Your agent already exists, but it needs a current signed permission before it can connect. Review its wallet permissions, then return to this page.</p>
-            <a className="flow-primary" href="/grant">Review wallet permissions <ArrowRight size={16} aria-hidden /></a>
-            <button className="connect-cancel" disabled={loading} onClick={() => void refresh(true)}>I’ve updated my permission</button>
+            <span className="connect-step-label">{t("connect.s2")}</span>
+            <h2>{t("connect.renewTitle")}</h2>
+            <p>{t("connect.renewBody")}</p>
+            <a className="flow-primary" href="/grant">{t("connect.reviewPerms")} <ArrowRight size={16} aria-hidden /></a>
+            <button className="connect-cancel" disabled={loading} onClick={() => void refresh(true)}>{t("connect.updated")}</button>
           </>}
 
           {pending && connection.signed_in && !connection.has_agent && !showSetup && !needsRenewal && <>
-            <span className="connect-step-label">02 · YOUR AGENT</span>
-            <h2>Give your agent a home.</h2>
-            <p>Choose its name, strategy, and trading limits. You’ll keep control of its wallet and complete the recovery step before connecting {appName}.</p>
-            <button className="flow-primary" disabled={loading} onClick={() => setShowSetup(true)}>Set up your agent <ArrowRight size={16} aria-hidden /></button>
+            <span className="connect-step-label">{t("connect.s2")}</span>
+            <h2>{t("connect.homeTitle")}</h2>
+            <p>{t("connect.homeBody", { app: appName })}</p>
+            <button className="flow-primary" disabled={loading} onClick={() => setShowSetup(true)}>{t("connect.setupBtn")} <ArrowRight size={16} aria-hidden /></button>
           </>}
 
           {setup && (showFunding && account
-            ? <><FundingPanel mode="deposit" account={account} onClose={finishSetup} /><button className="flow-primary" disabled={loading} onClick={finishSetup}>Continue to app access <ArrowRight size={16} aria-hidden /></button></>
-            : <><div className="connect-setup-note">Setting up your agent for {appName}. You’ll review app access next.</div><CreateAgent account={account} onRefresh={refreshAccount} onSignedIn={onSignedIn} onBack={() => setShowSetup(false)} onDone={finishSetup} onFund={openFunding} /></>)}
+            ? <><FundingPanel mode="deposit" account={account} onClose={finishSetup} /><button className="flow-primary" disabled={loading} onClick={finishSetup}>{t("connect.continueBtn")} <ArrowRight size={16} aria-hidden /></button></>
+            : <><div className="connect-setup-note">{t("connect.setupNote", { app: appName })}</div><CreateAgent account={account} onRefresh={refreshAccount} onSignedIn={onSignedIn} onBack={() => setShowSetup(false)} onDone={finishSetup} onFund={openFunding} /></>)}
 
           {pending && connection.signed_in && connection.has_agent && !showSetup && <>
-            <span className="connect-step-label">03 · ALLOW ACCESS</span>
-            <h2>Connect to {appName}?</h2>
-            <p>This gives the app the following access to your agent:</p>
-            <ul className="connect-permissions">{connection.scopes.map(scope => <li key={scope}><Check size={17} aria-hidden /><div><strong>{ACCESS[scope]?.title || scope}</strong><span>{ACCESS[scope]?.detail || "This permission is requested by the app."}</span></div></li>)}</ul>
-            <div className="connect-boundary"><ShieldCheck size={19} aria-hidden /><p>Your owner key stays with you. Connecting this app does not change your trading settings or limits. You can disconnect its access here.</p></div>
-            <button className="flow-primary" disabled={busy || loading} onClick={() => void allowAccess()}>{busy ? "Connecting…" : `Allow ${appName}`} {!busy && <ArrowRight size={16} aria-hidden />}</button>
-            <a className="connect-cancel" href="/">Cancel</a>
+            <span className="connect-step-label">{t("connect.s3")}</span>
+            <h2>{t("connect.allowTitle", { app: appName })}</h2>
+            <p>{t("connect.allowBody")}</p>
+            <ul className="connect-permissions">{connection.scopes.map(scope => <li key={scope}><Check size={17} aria-hidden /><div><strong>{ACCESS[scope] ? t(ACCESS[scope]!.title) : scope}</strong><span>{ACCESS[scope] ? t(ACCESS[scope]!.detail) : t("connect.accessFallback")}</span></div></li>)}</ul>
+            <div className="connect-boundary"><ShieldCheck size={19} aria-hidden /><p>{t("connect.boundary")}</p></div>
+            <button className="flow-primary" disabled={busy || loading} onClick={() => void allowAccess()}>{busy ? t("connect.connecting") : t("connect.allowBtn", { app: appName })} {!busy && <ArrowRight size={16} aria-hidden />}</button>
+            <a className="connect-cancel" href="/">{t("connect.cancel")}</a>
           </>}
 
           {connection?.status === "linked" && <>
             <div className="connect-success-icon"><Check size={25} aria-hidden /></div>
-            <h2>Back to {appName}.</h2>
-            <p>The connection is ready. Switch back to your original app {connection.scopes.includes("chat:agents") ? "to talk with your agent or check its status." : "to check your agent’s status."}</p>
-            <p className="connect-subtle">Connection access is separate from trading. Your agent’s actual readiness and trading mode are shown in Merrymen.</p>
-            <a className="flow-primary" href="/agent">View your agent <ArrowRight size={16} aria-hidden /></a>
+            <h2>{t("connect.backTitle", { app: appName })}</h2>
+            <p>{connection.scopes.includes("chat:agents") ? t("connect.backChat") : t("connect.backStatus")}</p>
+            <p className="connect-subtle">{t("connect.subtle")}</p>
+            <a className="flow-primary" href="/agent">{t("connect.viewAgent")} <ArrowRight size={16} aria-hidden /></a>
             <div className="connect-disconnect">
-              {removeConfirm ? <><p>Remove {appName}’s access? Your agent will remain in Merrymen.</p><div><button className="connect-danger" disabled={busy} onClick={() => void disconnect()}>{busy ? "Disconnecting…" : "Disconnect app"}</button><button className="connect-cancel" disabled={busy} onClick={() => setRemoveConfirm(false)}>Keep connected</button></div></>
-                : <button className="connect-cancel" onClick={() => setRemoveConfirm(true)}><Unplug size={15} aria-hidden /> Disconnect app</button>}
+              {removeConfirm ? <><p>{t("connect.removeQ", { app: appName })}</p><div><button className="connect-danger" disabled={busy} onClick={() => void disconnect()}>{busy ? t("connect.disconnecting") : t("connect.disconnectBtn")}</button><button className="connect-cancel" disabled={busy} onClick={() => setRemoveConfirm(false)}>{t("connect.keep")}</button></div></>
+                : <button className="connect-cancel" onClick={() => setRemoveConfirm(true)}><Unplug size={15} aria-hidden /> {t("connect.disconnectBtn")}</button>}
             </div>
           </>}
 
-          {connection?.status === "revoked" && <><Unplug className="connect-revoked-icon" size={30} aria-hidden /><h2>You’re in control.</h2><p>To connect again, request a fresh link from {appName}.</p><a className="flow-primary" href="/agent">Go to your agent <ArrowRight size={16} aria-hidden /></a></>}
+          {connection?.status === "revoked" && <><Unplug className="connect-revoked-icon" size={30} aria-hidden /><h2>{t("connect.controlTitle")}</h2><p>{t("connect.controlBody", { app: appName })}</p><a className="flow-primary" href="/agent">{t("connect.goAgent")} <ArrowRight size={16} aria-hidden /></a></>}
 
-          {error && <div className="connect-error" role="alert"><p>{error}</p>{token && <button disabled={loading || busy} onClick={() => void refresh()}>Try again</button>}</div>}
+          {error && <div className="connect-error" role="alert"><p>{error}</p>{token && <button disabled={loading || busy} onClick={() => void refresh()}>{t("connect.tryAgain")}</button>}</div>}
         </section>
       </main>
-      <footer className="connect-footer">Built on Merrymen. Controlled by you.</footer>
+      <footer className="connect-footer">{t("connect.footer")}</footer>
     </div>
   );
 }

@@ -1,6 +1,9 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { describe, it } from "node:test";
+import { EN } from "../lib/messages/en";
+
+const EN_TEXT = Object.values(EN).join("\n");
 
 /**
  * A CHART IS A PUBLISHED FIGURE TOO.
@@ -39,8 +42,11 @@ describe("the equity chart is behind the same gate as the return", () => {
 
   it("the refusal says WHY, rather than rendering an empty chart", () => {
     // An owner who sees a blank panel learns nothing. The sentence is the point.
-    assert.match(CHART, /inferred from balance changes/);
-    assert.match(CHART, /not published until the capital behind it is evidenced/);
+    // i18n: it lives in the catalogue now; pin the key at the call site and
+    // the wording in EN.
+    assert.match(CHART, /t\("common\.equityUnevidenced"\)/);
+    assert.match(EN_TEXT, /inferred from balance changes/);
+    assert.match(EN_TEXT, /not published until the capital behind it is evidenced/);
   });
 
   it("PAPER agents are unaffected — their book is its own domain", () => {

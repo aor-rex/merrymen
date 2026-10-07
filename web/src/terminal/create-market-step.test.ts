@@ -37,7 +37,9 @@ describe("the wizard asks what to trade", () => {
   });
 
   it("and the progress list counts it, so the owner is not surprised by a fifth screen", () => {
-    assert.match(code, /\["Agent","Market","Limits","Backup","Ready"\]/);
+    // The step names render through the catalogue; the five keys are what
+    // this pins, in wizard order.
+    assert.match(code, /STEPS:MessageKey\[\]=\["onboard\.stepAgent","onboard\.stepMarket","onboard\.stepLimits","onboard\.stepBackup","onboard\.stepReady"\]/);
   });
 
   it("BACK GOES BACK THROUGH IT, rather than skipping a step the owner just filled in", () => {
@@ -88,7 +90,8 @@ describe("adding a coin here does both writes, like everywhere else", () => {
   it("IT IS ADDED AND SELECTED", () => {
     // Same rule as the Settings screen: "know about this" and "trade it" are
     // two different writes, and hiding the second is what made it a trap.
-    const at = code.indexOf("add coin");
+    // The control's label renders through the catalogue; the key is the anchor.
+    const at = code.indexOf("onboard.addCoin");
     assert.ok(at > 0, "the control must exist");
     const handler = code.slice(code.lastIndexOf("onClick", at) - 1200, at);
     assert.match(handler, /setWizardTokens/);

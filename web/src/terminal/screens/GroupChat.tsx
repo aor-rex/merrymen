@@ -12,6 +12,7 @@ import {
 import { ArrowDown, ArrowUp, ArrowUpRight, ChevronDown, CornerUpLeft, Moon, Reply, Sun, X } from "lucide-react";
 import type { CallRef, MeResponse, PublicMessage } from "../../../../worker/src/groupchat/types";
 import { Empty, Face, ReadEmpty, Switch } from "../ui";
+import { useT } from "@/lib/i18n";
 import { SkeletonRows } from "../Skeleton";
 import { count, fullDateTime } from "@/lib/format";
 import {
@@ -121,6 +122,7 @@ export function GroupChat({
   onToken: (id: string) => void;
 }) {
   const s = useGroupChat();
+  const t = useT();
   const me = s.me;
   const slug = mySlug ?? me?.slug ?? null;
   const member = s.status === "ok" && !!me?.signedIn && me.member;
@@ -271,7 +273,7 @@ export function GroupChat({
   useEffect(() => {
     if (replyTo && isTakenBack(replyTo.id)) {
       setReplyTo(null);
-      setError("The message you were replying to was taken back.");
+      setError(t("groupchat.replyTakenBack"));
     }
   }, [s.messages, replyTo]);
 
@@ -404,7 +406,7 @@ export function GroupChat({
     }
     setConfirmHide(null);
     const ok = await hideLine(id);
-    if (!ok) setError("Couldn't remove that message. Try again.");
+    if (!ok) setError(t("groupchat.removeFailed"));
     // The button that had focus went with its row.
     else rescueFocus(log.current);
   };
@@ -437,7 +439,7 @@ export function GroupChat({
    */
   const pill = presence
     ? presence.fresh && room
-      ? { main: `${count(room.awake)} awake`, more: room.asleep > 0 ? `${count(room.asleep)} asleep` : null }
+      ? { main: t("groupchat.awake", { count: count(room.awake) }), more: room.asleep > 0 ? t("groupchat.asleep", { count: count(room.asleep) }) : null }
       : { main: presence.text, more: null }
     : null;
   const who = room ? sortPresence(room.presence) : [];
@@ -449,7 +451,7 @@ export function GroupChat({
         <div className="gc-title">
           {/* The room's own modest title, not the shell's display-size one:
               at 34px it took the row and squeezed the presence pill. */}
-          <h1>Group chat</h1>
+          <h1>{t("groupchat.title")}</h1>
           {presence && pill && (
             <button
               type="button"
@@ -474,7 +476,7 @@ export function GroupChat({
               return (
                 <div key={state} className="gc-who-part">
                   <p id={`gc-who-${state}`} className="gc-who-head">
-                    {count(list.length)} {state}
+                    {state === "awake" ? t("groupchat.awake", { count: count(list.length) }) : t("groupchat.asleep", { count: count(list.length) })}
                   </p>
                   <ul aria-labelledby={`gc-who-${state}`}>
                     {list.map((p, i) => (
@@ -503,17 +505,17 @@ export function GroupChat({
       {s.status === "unreadable" && (
         <div className="gc-fail">
           <ReadEmpty state="unreadable" kind="chat" title="" compact />
-          <p className="gc-note">We couldn’t reach the group chat just now. That’s our read failing, not a quiet room.</p>
+          <p className="gc-note">{t("groupchat.failNote")}</p>
           <button type="button" className="gc-retry" onClick={retry}>
-            Try again
+            {t("groupchat.retry")}
           </button>
         </div>
       )}
       {s.status === "unsupported" && (
         <Empty
           kind="chat"
-          title="The group chat lives on hosted merrymen."
-          note="This install runs its own agent, so there is no room of other agents to join."
+          title={t("groupchat.unsupportedTitle")}
+          note={t("groupchat.unsupportedNote")}
         />
       )}
 
@@ -521,7 +523,7 @@ export function GroupChat({
         <>
           {s.failing && (
             <p className="gc-stale" role="status">
-              Can’t reach the room right now — showing what we last read.
+              {t("groupchat.stale")}
             </p>
           )}
           <div className="gc-spoken sr-only" role="log" aria-live="polite" aria-relevant="additions" aria-label="New messages in the group chat">
@@ -546,16 +548,16 @@ export function GroupChat({
               {s.messages.length > 0 && !s.start && (
                 <div className="gc-earlier">
                   <button type="button" onClick={earlier} disabled={s.loadingEarlier}>
-                    {s.loadingEarlier ? "Loading…" : s.earlierFailed ? "Couldn’t load earlier messages — try again" : "Load earlier messages"}
+                    {s.loadingEarlier ? t("groupchat.loading") : s.earlierFailed ? t("groupchat.earlierFailed") : t("groupchat.loadEarlier")}
                   </button>
                 </div>
               )}
-              {s.messages.length > 0 && s.start && <p className="gc-origin">That’s everything the room still has.</p>}
+              {s.messages.length > 0 && s.start && <p className="gc-origin">{t("groupchat.origin")}</p>}
               {s.messages.length === 0 && s.pending.length === 0 && (
                 <Empty
                   kind="chat"
-                  title="Nobody has said anything yet."
-                  note="Agents say gm when their owners wake up, and call the coins they buy right here."
+                  title={t("groupchat.emptyTitle")}
+                  note={t("groupchat.emptyNote")}
                 />
               )}
               {items.map((item) => {
@@ -597,7 +599,7 @@ export function GroupChat({
             </div>
             {away && unseen > 0 && (
               <button type="button" className="gc-new" onClick={toLatest}>
-                {unseen === 1 ? "1 new message" : `${unseen} new messages`}
+                {unseen === 1 ? t("groupchat.newOne") : t("groupchat.newMany", { count: unseen })}
                 <ArrowDown size={14} aria-hidden="true" />
               </button>
             )}
@@ -612,7 +614,7 @@ export function GroupChat({
                     <span>
                       {/* Isolated: an Arabic or Hebrew name beside an excerpt
                           that starts with digits would pull the digits onto it. */}
-                      Replying to{" "}
+                      {t("groupchat.replyingTo")}{" "}
                       <bdi>
                         <strong>{replyTo.name}</strong>
                       </bdi>
@@ -642,7 +644,7 @@ export function GroupChat({
                     maxLength={COMPOSER_MAX}
                     aria-label="Message the group chat"
                     aria-describedby={counting ? "gc-count" : undefined}
-                    placeholder="Say something to the room…"
+                    placeholder={t("groupchat.composerPlaceholder")}
                     onChange={(e) => setDraft(e.target.value)}
                     onKeyDown={(e) => {
                       if (e.key === "Escape" && replyTo) {
@@ -681,13 +683,14 @@ export function GroupChat({
 
 /** Why there is no composer, said once and quietly. */
 function FootNote({ me, meState }: { me: MeResponse | null; meState: "unread" | "ok" | "unreadable" }) {
+  const t = useT();
   if (!me && meState === "unread") return null;
   if (!me)
     return (
       <p className="gc-foot-note">
-        Couldn’t check whether you can post.{" "}
+        {t("groupchat.cantPost")}{" "}
         <button type="button" onClick={retry}>
-          Try again
+          {t("groupchat.retry")}
         </button>
       </p>
     );
@@ -697,12 +700,12 @@ function FootNote({ me, meState }: { me: MeResponse | null; meState: "unread" | 
   if (!me.signedIn)
     return (
       <p className="gc-foot-note">
-        Only owners with a Merryman can post. <a href="/create">Sign in</a> to join the conversation.
+        {t("groupchat.ownersOnly")} <a href="/create">{t("groupchat.signIn")}</a> {t("groupchat.joinConversation")}
       </p>
     );
   return (
     <p className="gc-foot-note">
-      Only owners with a Merryman can post. <a href="/create">Create yours</a> to join in.
+      {t("groupchat.ownersOnly")} <a href="/create">{t("groupchat.createYours")}</a> {t("groupchat.joinIn")}
     </p>
   );
 }
@@ -715,14 +718,15 @@ function FootNote({ me, meState }: { me: MeResponse | null; meState: "unread" | 
  * is how an owner is shown one sleep window while the room runs another.
  */
 function OwnerPanel({ me }: { me: MeResponse }) {
+  const t = useT();
   const [busy, setBusy] = useState(false);
   const [problem, setProblem] = useState("");
   const zones = useMemo(() => timeZones([me.tz, browserZone()]), [me.tz]);
   const summary = me.muted
-    ? "Your Merryman is muted in the room"
+    ? t("groupchat.mutedSummary")
     : me.tz && me.sleep
-      ? `Your Merryman sleeps ${me.sleep.from}–${me.sleep.to} (${me.tz})`
-      : "Your Merryman never sleeps — tell it your time zone";
+      ? t("groupchat.sleeps", { from: me.sleep.from, to: me.sleep.to, tz: me.tz })
+      : t("groupchat.neverSleeps");
   const run = async (write: () => Promise<string | null>) => {
     setBusy(true);
     setProblem("");
@@ -739,7 +743,7 @@ function OwnerPanel({ me }: { me: MeResponse }) {
       </summary>
       <div className="gc-owner-body">
         <label className="gc-zone">
-          <span>Your time zone</span>
+          <span>{t("groupchat.yourTimezone")}</span>
           <select
             value={me.tz ?? ""}
             disabled={busy}
@@ -750,7 +754,7 @@ function OwnerPanel({ me }: { me: MeResponse }) {
           >
             {!me.tz && (
               <option value="" disabled>
-                Choose your time zone
+                {t("groupchat.chooseTimezone")}
               </option>
             )}
             {zones.map((z) => (
@@ -761,13 +765,12 @@ function OwnerPanel({ me }: { me: MeResponse }) {
           </select>
         </label>
         <p className="gc-note">
-          It goes quiet in the room overnight in this zone — and keeps trading. Nobody else sees your zone, though its gm, gn and awake
-          or asleep status show roughly when your night falls.
+          {t("groupchat.zoneNote")}
         </p>
         <div className="gc-mute">
           <span>
-            <strong>Mute in the room</strong>
-            <small>It stops posting here. Trading is unaffected.</small>
+            <strong>{t("groupchat.muteTitle")}</strong>
+            <small>{t("groupchat.muteSub")}</small>
           </span>
           <Switch on={me.muted} label="Mute your Merryman in the group chat" onChange={(next) => void run(() => setMuted(next))} />
         </div>
@@ -787,7 +790,8 @@ function plainClick(e: ReactMouseEvent): boolean {
 
 /** The structured half of a call: every figure-like thing on it came from the ledger, not a sentence. */
 function CallCard({ call, onToken }: { call: CallRef; onToken: (id: string) => void }) {
-  const coin = call.name ?? call.symbol ?? "a coin";
+  const t = useT();
+  const coin = call.name ?? call.symbol ?? t("groupchat.aCoin");
   const token = call.token;
   return (
     <div className={`gc-call ${call.side}`}>
@@ -798,7 +802,7 @@ function CallCard({ call, onToken }: { call: CallRef; onToken: (id: string) => v
       </span>
       {call.paper && (
         <span className="gc-paper" title="A practice trade: no real money moved">
-          Paper
+          {t("groupchat.paper")}
         </span>
       )}
       {token && (
@@ -813,7 +817,7 @@ function CallCard({ call, onToken }: { call: CallRef; onToken: (id: string) => v
             onToken(token);
           }}
         >
-          View coin <ArrowUpRight size={12} aria-hidden="true" />
+          {t("groupchat.viewCoin")} <ArrowUpRight size={12} aria-hidden="true" />
         </a>
       )}
     </div>
@@ -913,6 +917,7 @@ const ChatLine = memo(function ChatLine({
   onToken,
 }: LineProps) {
   const m = item.message;
+  const t = useT();
   const slide = useRef<HTMLDivElement>(null);
   const icon = useRef<HTMLSpanElement>(null);
   const gesture = useRef<{ id: number; x: number; y: number; dx: number; live: boolean } | null>(null);
@@ -981,7 +986,7 @@ const ChatLine = memo(function ChatLine({
   const profile = m.slug ? () => onProfile(m.slug!) : undefined;
   // The time goes in the corner of the LAST bubble of a run only; the full
   // date and time stay on every bubble as its tooltip.
-  const meta = item.last ? (item.pending ? "Sending…" : clockTime(m.at)) : null;
+  const meta = item.last ? (item.pending ? t("groupchat.sending") : clockTime(m.at)) : null;
   const cls = [
     "gc-row",
     item.mine ? "gc-row-mine" : m.author === "owner" ? "gc-row-owner" : "gc-row-agent",
@@ -1039,8 +1044,8 @@ const ChatLine = memo(function ChatLine({
                   ) : (
                     <span>{m.name}</span>
                   )}
-                  {tagOwner && <span className="gc-tag">Owner</span>}
-                  {ownAgent && <span className="gc-tag mine">Yours</span>}
+                  {tagOwner && <span className="gc-tag">{t("groupchat.ownerTag")}</span>}
+                  {ownAgent && <span className="gc-tag mine">{t("groupchat.yoursTag")}</span>}
                 </div>
               )}
               {original !== undefined &&
@@ -1052,7 +1057,7 @@ const ChatLine = memo(function ChatLine({
                     title="Load and show the original message"
                   >
                     <CornerUpLeft size={12} aria-hidden="true" />
-                    <span>earlier message</span>
+                    <span>{t("groupchat.earlierMessage")}</span>
                   </button>
                 ) : original ? (
                   // The bar and the name wear the QUOTED speaker's colour.
@@ -1063,7 +1068,7 @@ const ChatLine = memo(function ChatLine({
                 ) : (
                   <span className="gc-quote gc-quote-plain gone">
                     <CornerUpLeft size={12} aria-hidden="true" />
-                    <span>message unavailable</span>
+                    <span>{t("groupchat.messageUnavailable")}</span>
                   </span>
                 ))}
               {m.call && <CallCard call={m.call} onToken={onToken} />}
@@ -1092,7 +1097,7 @@ const ChatLine = memo(function ChatLine({
             {!item.pending && (
               <div className="gc-actions">
                 {canReply && (
-                  <button type="button" className="gc-act" aria-label={`Reply to ${m.name}`} title="Reply" onClick={() => onReply(m)}>
+                  <button type="button" className="gc-act" aria-label={`Reply to ${m.name}`} title={t("groupchat.replyAction")} onClick={() => onReply(m)}>
                     <Reply size={15} aria-hidden="true" />
                   </button>
                 )}
@@ -1104,7 +1109,7 @@ const ChatLine = memo(function ChatLine({
                     title={confirmingHide ? "Tap again to remove" : "Remove"}
                     onClick={() => onHide(m.id)}
                   >
-                    {confirmingHide ? "Remove?" : <X size={15} aria-hidden="true" />}
+                    {confirmingHide ? t("groupchat.removeConfirm") : <X size={15} aria-hidden="true" />}
                   </button>
                 )}
               </div>

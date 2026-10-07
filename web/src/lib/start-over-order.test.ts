@@ -19,6 +19,14 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { describe, it } from "node:test";
 import ts from "typescript";
+import { EN } from "./messages/en";
+
+/** `t` for the transpiled handler: the catalogue, with `{params}` filled in. */
+const translate = (key: string, params?: Record<string, string | number>) => {
+  let s = (EN as Record<string, string>)[key] ?? key;
+  for (const [k, v] of Object.entries(params ?? {})) s = s.replaceAll(`{${k}}`, String(v));
+  return s;
+};
 
 const SRC = readFileSync(new URL("../terminal/screens/Wallet.tsx", import.meta.url), "utf8");
 const AST = ts.createSourceFile("Wallet.tsx", SRC, ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX);
@@ -88,6 +96,7 @@ describe("Start over", () => {
         funding: null,
         grant: null,
         session: { hosted: false, address: null },
+        t: translate,
         loadGrant: () => stored,
         fetch: async () => {
           steps.push("request");

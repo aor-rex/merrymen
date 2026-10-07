@@ -33,6 +33,7 @@ import {
 } from "../profile-view";
 import { SwapsTable } from "../SwapsTable";
 import { swapRowsOfProfile } from "../swaps";
+import { useT } from "@/lib/i18n";
 
 export function Profile({
   agent,
@@ -73,6 +74,7 @@ export function Profile({
   isMine?: boolean;
   activityError?: string;
 }) {
+  const t = useT();
   const [showAll, setShowAll] = useState(false);
   /**
    * MOST AGENTS HAVE NO BANNER, and that is not a failure to report.
@@ -93,13 +95,13 @@ export function Profile({
   const positions =
     g.legs?.map((l) => ({
       symbol: l.symbol,
-      detail: `${l.weight}% allocation`,
+      detail: t("profile.allocation", { weight: l.weight }),
     })) ??
     g.open?.map((l) => ({
       symbol: l.symbol,
-      detail: `${pctPts(l.pnlPct)} return`,
+      detail: t("profile.returnDetail", { value: pctPts(l.pnlPct) }),
     })) ??
-    g.parked?.map((symbol) => ({ symbol, detail: "Held" })) ??
+    g.parked?.map((symbol) => ({ symbol, detail: t("profile.held") })) ??
     [];
   const mentioned = [
     ...new Set(posts.flatMap((t) => (t.symbol ? [t.symbol] : []))),
@@ -183,7 +185,7 @@ export function Profile({
       <section className="public-performance" aria-label="Agent performance">
         <div className="public-performance-numbers">
           <div>
-            <span className="account-label">{agent.mode === "paper" ? "Paper return" : "Net return on contributed capital"}</span>
+            <span className="account-label">{agent.mode === "paper" ? t("profile.paperReturn") : t("profile.netReturn")}</span>
             <strong
               className={`public-return ${displayPnl == null ? "" : displayPnl < 0 ? "down" : "up"}`}
             >
@@ -198,23 +200,23 @@ export function Profile({
               face. */}
           <div className="public-trade-count">
             <strong>{agent.landed}</strong>
-            <span>Completed operations</span>
+            <span>{t("profile.completedOps")}</span>
             {!!agent.filledPaper && (
               <small className="public-paper-count">
-                {agent.filledPaper} paper trades
+                {t("profile.paperCount", { count: agent.filledPaper })}
               </small>
             )}
           </div>
         </div>
-        {displayPnl == null && <p className="public-empty">{agent.mode === "paper" ? "Paper return is unavailable until the recorded balance, holdings and fills can be reconciled." : agent.unrankedWhy ? unrankedLabel(agent.unrankedWhy) : "Return unavailable."}</p>}
-        {agent.mode === "paper" && displayPnl != null && <p className="public-empty">Change in paper equity since the first recorded valuation of this paper period.</p>}
+        {displayPnl == null && <p className="public-empty">{agent.mode === "paper" ? t("profile.paperUnavailable") : agent.unrankedWhy ? unrankedLabel(agent.unrankedWhy) : t("profile.returnUnavailable")}</p>}
+        {agent.mode === "paper" && displayPnl != null && <p className="public-empty">{t("profile.paperNote")}</p>}
         {/* "Net of $0.00 in priced gas" under a sponsored agent's return was true
             and read like a rounding error. When every landed operation was
             sponsored — measured, never assumed (gasless.ts) — the sentence says
             who paid instead. */}
         {agent.mode !== "paper" && displayPnl != null && agent.gas && (agent.gasless === true
-          ? <p className="public-empty">No gas came out of this return: every trade was sponsored.</p>
-          : <p className="public-empty">Net of {money(agent.gas.usdg)} in priced gas.{agent.gas.unpricedTrades > 0 && <> {agent.gas.unpricedTrades} trades had gas we could not price; this is not the full cost.</>}</p>)}
+          ? <p className="public-empty">{t("profile.gasSponsored")}</p>
+          : <p className="public-empty">{t("profile.gasNet", { amount: money(agent.gas.usdg) })}{agent.gas.unpricedTrades > 0 && <> {t("profile.gasUnpriced", { count: agent.gas.unpricedTrades })}</>}</p>)}
         {/* THE GATE, BEFORE THE DRAW.
             Two things have to be true before a line goes under the words
             "Performance history": it must be the growth index (deposits divided
@@ -226,55 +228,52 @@ export function Profile({
             springing into existence at full value. */}
         {agent.mode === "paper" ? null : agent.curveKind !== "growth" ? (
           <p className="public-empty">
-            Performance history isn’t available yet.
+            {t("profile.noHistory")}
           </p>
         ) : agent.contributionsEvidenced === false ? (
           <p className="public-empty">
-            The deposits and withdrawals on record for this agent are inferred from balance changes
-            rather than read from the chain, so they cannot be divided out of its equity — and a
-            growth figure computed over them would not be its doing. The return is not published
-            until the capital behind it is evidenced.
+            {t("profile.inferredFlows")}
           </p>
         ) : agent.curve.length > 1 ? (
           <ProfileChart agent={agent} displayPnl={displayPnl} />
         ) : (
           <p className="public-empty">
-            Performance history isn’t available yet.
+            {t("profile.noHistory")}
           </p>
         )}
       </section>
       <section className="public-strategy">
         <div className="public-section-heading">
-          <h2>Strategy</h2>
-          <span>{g.known === false ? "Not published" : strategyName(g.id)}</span>
+          <h2>{t("profile.strategy")}</h2>
+          <span>{g.known === false ? t("profile.notPublished") : strategyName(g.id)}</span>
         </div>
-        <p>{agent.thesis || "This agent hasn’t shared its approach yet."}</p>
+        <p>{agent.thesis || t("profile.noThesis")}</p>
       </section>
       {/* TOP TRADES, by return and never by dollars — a dollar ranking ranks
           position size and would leak the sizes a private book hides. Absent
           entirely on the leaderboard fallback, which never read them. */}
       {topTrades !== undefined && (
         <section className="public-section" aria-label="Top trades">
-          <div className="public-section-heading"><h2>Top trades</h2><span>{agent.mode === "paper" ? "Paper sells, by return" : "Closed sells, by return"}</span></div>
+          <div className="public-section-heading"><h2>{t("profile.topTrades")}</h2><span>{agent.mode === "paper" ? t("profile.paperSells") : t("profile.closedSells")}</span></div>
           {/* UNREAD covers a list whose costs could not be checked, too — a
               coin traded more often than one replay reads (profile-trades.ts
               readTopTrades) — which a retry does not cure, so this promises none. */}
           {!own?.topTrades && agent.topTradesRead === false ? (
-            <p role="status" className="public-empty">Top trades could not be loaded.</p>
+            <p role="status" className="public-empty">{t("profile.topFailed")}</p>
           ) : topTrades.length === 0 ? (
-            <Empty compact title="No closed trades yet" />
+            <Empty compact title={t("profile.noClosed")} />
           ) : (
             <ol className="profile-top-trades">
-              {topTrades.map((t, i) => {
-                const token = t.symbol ? tokens.find((k) => k.symbol.toUpperCase() === t.symbol!.toUpperCase()) : undefined;
-                const f = topTradeFigures(t, showMoney);
+              {topTrades.map((trade, i) => {
+                const token = trade.symbol ? tokens.find((k) => k.symbol.toUpperCase() === trade.symbol!.toUpperCase()) : undefined;
+                const f = topTradeFigures(trade, showMoney);
                 return (
-                  <li key={t.id} className="profile-top-trade">
+                  <li key={trade.id} className="profile-top-trade">
                     <span className="profile-top-rank">#{i + 1}</span>
-                    <Coin symbol={t.symbol ?? "?"} logo={token?.logo ?? ""} />
-                    <span className="profile-top-name" title={fullDateTime(t.at * 1000)}>
-                      <strong>{t.symbol ?? "Token label unavailable"}</strong>
-                      {(t.displayName ?? token?.name) && <small>{t.displayName ?? token?.name}</small>}
+                    <Coin symbol={trade.symbol ?? "?"} logo={token?.logo ?? ""} />
+                    <span className="profile-top-name" title={fullDateTime(trade.at * 1000)}>
+                      <strong>{trade.symbol ?? t("profile.noLabel")}</strong>
+                      {(trade.displayName ?? token?.name) && <small>{trade.displayName ?? token?.name}</small>}
                     </span>
                     <span className={`profile-top-figure ${f.tone}`}>
                       {f.pct}
@@ -288,38 +287,38 @@ export function Profile({
         </section>
       )}
       <section className="public-section" aria-label="Trade history">
-        <div className="public-section-heading"><h2>Buys & sells</h2><span>Latest fills</span></div>
+        <div className="public-section-heading"><h2>{t("profile.buysSells")}</h2><span>{t("profile.latestFills")}</span></div>
         {/* THE SAME TABLE THE OWNER'S DESK USES (SwapsTable.tsx, rules in
             swaps.ts). It replaced a four-line article per fill that printed a
             full date, "Not realized on a buy" under every buy and no coin.
             Dollars only on a published book or the owner's own view: the
             server withholds a private book's sizes, and the table refuses to
             print one it was handed. */}
-        {!own?.recentTrades && agent.activityRead === false ? <p role="status" className="public-empty">Trade history could not be loaded. Retrying shortly.</p> : recentTrades === undefined ? <p className="public-empty">Loading trade history…</p> : <>
+        {!own?.recentTrades && agent.activityRead === false ? <p role="status" className="public-empty">{t("profile.historyFailed")}</p> : recentTrades === undefined ? <p className="public-empty">{t("profile.loadingHistory")}</p> : <>
           <SwapsTable
             rows={swapRowsOfProfile(recentTrades)}
             tokens={tokens}
             showMoney={showMoney}
-            emptyTitle="No completed buys or sells recorded in this trading period."
+            emptyTitle={t("profile.emptySwaps")}
             onToken={onToken}
           />
           {recentTrades.length > 0 && agent.publicBook === false && (own?.recentTrades
-            ? <p className="public-empty">Only you can see the sizes and dollar figures here. Visitors see percentages.</p>
-            : <p className="public-empty">Trade sizes are private.</p>)}
-          {recentTrades.length > 0 && <p className="public-empty">This list shows swaps. The completed-operations total also includes other executed actions.</p>}
-          {recentTrades.length > 0 && <p className="public-empty">Sale P&L compares proceeds with the cost of the quantity sold, before gas.</p>}
+            ? <p className="public-empty">{t("profile.ownerMoney")}</p>
+            : <p className="public-empty">{t("profile.sizesPrivate")}</p>)}
+          {recentTrades.length > 0 && <p className="public-empty">{t("profile.swapsNote")}</p>}
+          {recentTrades.length > 0 && <p className="public-empty">{t("profile.saleNote")}</p>}
           {/* A SELL LISTED WITH NO RETURN IS NOT SILENT. Its cost was an
               estimate, or could not be checked at all (profile-trades.ts): the
               row stays, its figure does not, and this says which kind of
               absence it is — not a zero, not a list that forgot. */}
           {recentTrades.some((t) => t.action === "sell" && t.realizedPnlBps === null) && (
-            <p className="public-empty">A sale with no return is one whose cost could not be confirmed.</p>
+            <p className="public-empty">{t("profile.saleNoReturn")}</p>
           )}
         </>}
       </section>
       <section className="public-section">
         <div className="public-section-heading">
-          <h2>Positions</h2>
+          <h2>{t("profile.positions")}</h2>
           <span>{positions.length || "—"}</span>
         </div>
         <Allocation legs={g.legs} />
@@ -339,7 +338,7 @@ export function Profile({
                 <Coin symbol={p.symbol} logo={token?.logo ?? ""} />
                 <span>
                   <strong>{p.symbol}</strong>
-                  <small>{token?.name ?? "Token"}</small>
+                  <small>{token?.name ?? t("profile.tokenFallback")}</small>
                 </span>
                 <span>{p.detail}</span>
                 {token && <span aria-hidden>↗</span>}
@@ -347,11 +346,11 @@ export function Profile({
             );
           })
         ) : (
-          <p className="public-empty">{agent.publicBook === false ? "This agent keeps its positions private." : agent.holdingsRead === false ? "Public holdings are unavailable right now." : "No current positions reported."}</p>
+          <p className="public-empty">{agent.publicBook === false ? t("profile.positionsPrivate") : agent.holdingsRead === false ? t("profile.holdingsDown") : t("profile.noPositions")}</p>
         )}
         {positions.length === 0 && mentioned.length > 0 && (
           <div className="public-mentioned">
-            <span>Recently discussed</span>
+            <span>{t("profile.discussed")}</span>
             <div>
               {mentioned.map((symbol) => {
                 const token = tokens.find(
@@ -375,12 +374,12 @@ export function Profile({
       </section>
       <section className="public-section">
         <div className="public-section-heading">
-          <h2>Recent decisions</h2>
-          <span>{posts.length} updates</span>
+          <h2>{t("profile.decisions")}</h2>
+          <span>{t("profile.updates", { count: posts.length })}</span>
         </div>
         {activityError && <p role="status" className="public-empty">{activityError}</p>}
         {!activityError && posts.length === 0 && (
-          <Empty compact title="No published decisions in the last 30 days."/>
+          <Empty compact title={t("profile.noDecisions")}/>
         )}
         <div className="public-activity">
           {posts.slice(0, showAll ? undefined : 4).map((post, i) => {
@@ -403,10 +402,10 @@ export function Profile({
                   <div className="public-event-heading">
                     <strong>
                       {post.action === "buy"
-                        ? "Buy"
+                        ? t("profile.buy")
                         : post.action === "sell"
-                          ? "Sell"
-                          : "Hold"}{" "}
+                          ? t("profile.sell")
+                          : t("profile.hold")}{" "}
                       {token ? (
                         <button type="button" onClick={() => onToken(token.id)}>
                           {post.symbol}
@@ -421,7 +420,7 @@ export function Profile({
                   </div>
                   <p>{post.reason ?? post.head}</p>
                   <small>
-                    {ageOf(post) ? `${ageOf(post)} ago` : "Time unavailable"}
+                    {ageOf(post) ? t("profile.ago", { age: ageOf(post) }) : t("profile.timeUnknown")}
                     {post.outcomeText ? ` · ${post.outcomeText}` : post.outcome ? ` · ${post.outcome}` : ""}
                     {post.paper ? " · Paper" : ""}
                   </small>
@@ -437,7 +436,7 @@ export function Profile({
             aria-expanded={showAll}
             onClick={() => setShowAll((v) => !v)}
           >
-            {showAll ? "Show less" : `View all ${posts.length} updates`}{" "}
+            {showAll ? t("profile.showLess") : t("profile.viewAll", { count: posts.length })}{" "}
             <span aria-hidden>{showAll ? "↑" : "↓"}</span>
           </button>
         )}
@@ -457,6 +456,7 @@ export function Profile({
  * longer name. See profile-view.ts, where each of those rules is tested.
  */
 function ProfileChart({ agent, displayPnl }: { agent: ProfileAgent; displayPnl: number | null }) {
+  const t = useT();
   const nowSec = Math.floor(useNow(60_000) / 1000);
   const [picked, setPicked] = useState<ChartWindow | null>(null);
   const points = agent.growthPoints;
@@ -466,7 +466,7 @@ function ProfileChart({ agent, displayPnl }: { agent: ProfileAgent; displayPnl: 
     return (
       <div className="public-chart" aria-label={`Performance history. Reported return ${pctBps(displayPnl)}.`}>
         <Boundary label="profile-chart"><PerformanceChart values={agent.curve} height={88} /></Boundary>
-        <p className="public-empty">Chart: time-weighted return over the displayed history, adjusted for deposits and withdrawals. Its period and calculation differ from the net return above.</p>
+        <p className="public-empty">{t("profile.chartLegacy")}</p>
       </div>
     );
   }
@@ -483,7 +483,7 @@ function ProfileChart({ agent, displayPnl }: { agent: ProfileAgent; displayPnl: 
             type="button"
             aria-pressed={w.id === active}
             disabled={!w.available}
-            title={w.available ? undefined : w.id === "ALL" ? "Only the most recent part of this period was read." : `This agent's history does not reach back ${w.words.replace("the last ", "")}.`}
+            title={w.available ? undefined : w.id === "ALL" ? t("profile.partialPeriod") : t("profile.historyGap", { period: w.words.replace("the last ", "") })}
             onClick={() => setPicked(w.id)}
           >
             {w.id}
@@ -494,13 +494,12 @@ function ProfileChart({ agent, displayPnl }: { agent: ProfileAgent; displayPnl: 
         <>
           <Boundary label="profile-chart"><PerformanceChart values={slice.values} height={88} /></Boundary>
           <p className="public-empty">
-            Chart: time-weighted return over {words}, adjusted for deposits and withdrawals.
-            {active === "ALL" ? " It covers the same period as the net return above; the two are calculated differently." : ""}
+            {t("profile.chartWindow", { period: words })}{active === "ALL" ? t("profile.chartSamePeriod") : ""}
           </p>
         </>
       ) : (
         <p className="public-empty">
-          {slice.state === "empty" ? `No readings in ${words}.` : slice.state === "partial" ? "Only the most recent part of this period was read." : `This agent's history is shorter than ${words.replace("the last ", "")}.`}
+          {slice.state === "empty" ? t("profile.noReadings", { period: words }) : slice.state === "partial" ? t("profile.partialPeriod") : t("profile.shortHistory", { period: words.replace("the last ", "") })}
         </p>
       )}
     </div>
@@ -550,6 +549,7 @@ function useOwnBook(slug: string | null, refreshKey: unknown): OwnBookView | nul
  * of leaving a switch that moved over a page that did not.
  */
 function BookSwitch({ on, onChanged }: { on: boolean; onChanged?: () => void }) {
+  const t = useT();
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState("");
   const [saved, setSaved] = useState<boolean | null>(null);
@@ -569,11 +569,11 @@ function BookSwitch({ on, onChanged }: { on: boolean; onChanged?: () => void }) 
   return (
     <section className="profile-book" aria-label="Public book">
       <div>
-        <strong>Public book</strong>
+        <strong>{t("profile.bookTitle")}</strong>
         <small>
           {shown
-            ? "Anyone can see this agent's trade sizes and dollar P&L, what it holds and how much, and its name as a holder on the token pages of what it holds. Its return and the percentage on each trade are public either way."
-            : "Its return and the percentage on each trade are public. Turn this on to also publish its trade sizes and dollar P&L, what it holds and how much, and its name as a holder on the token pages of what it holds."}
+            ? t("profile.bookOn")
+            : t("profile.bookOff")}
         </small>
         {error && <small role="alert" className="profile-book-error">{error}</small>}
       </div>

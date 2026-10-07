@@ -13,18 +13,21 @@
  * does not exist. It is still four tabs for the width reason above, which is
  * the argument that actually holds.
  */
+import type { MessageKey } from "@/lib/messages/en";
+
 export interface NavItem {
   href: string;
-  label: string;
+  /** Catalogue key for the label — rendered through `useT()` in AppShell. */
+  key: MessageKey;
   /** Matches this route and everything under it. */
   prefix?: string;
 }
 
 export const NAV: readonly NavItem[] = [
-  { href: "/", label: "Feed" },
-  { href: "/tokens", label: "Tokens", prefix: "/t" },
-  { href: "/leaderboard", label: "Leaderboard" },
-  { href: "/you", label: "You" },
+  { href: "/", key: "shell.navFeed" },
+  { href: "/tokens", key: "shell.navTokens", prefix: "/t" },
+  { href: "/leaderboard", key: "shell.navLeaderboard" },
+  { href: "/you", key: "shell.navYou" },
 ] as const;
 
 /** Which nav item owns this path. Exact for "/", prefix for the rest. */

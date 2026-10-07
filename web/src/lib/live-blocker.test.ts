@@ -18,6 +18,9 @@ import { describe, it } from "node:test";
 
 import { ADVISED_RULES, blockerAdvice } from "./live-blocker";
 import { chatStateOf } from "../terminal/chat-payload";
+import { EN } from "./messages/en";
+
+const EN_TEXT = Object.values(EN).join("\n");
 
 /** An agent as the chat screen holds it — only what the state builder reads. */
 const CHAT_MINE = { name: "Robin", equity: 1, moves: [], glance: { id: "steady-basket" } } as never;
@@ -333,8 +336,11 @@ describe("the funding screens warn the chain, not just name it", () => {
     // The panel named the chain once in small print beside a big copy button.
     // Naming is not warning — the stuck-funds sentence sits in the same breath.
     const src = readFileSync(new URL("../terminal/HostedControls.tsx", import.meta.url), "utf8");
-    assert.match(src, /and only there/);
-    assert.match(src, /funds sent there are stuck/);
+    // i18n: the sentence lives in the catalogue now; pin the key at the call
+    // site and the wording in EN.
+    assert.match(src, /t\("common\.fundAgentCopy"/);
+    assert.match(EN_TEXT, /and only there/);
+    assert.match(EN_TEXT, /funds sent there are stuck/);
   });
 
   it("THE WALLET NOTE NAMES ITS OWN CHAIN", () => {
@@ -342,8 +348,10 @@ describe("the funding screens warn the chain, not just name it", () => {
     // sat a block away in small type. The sentence that takes the money names
     // the network it must arrive on.
     const src = readFileSync(new URL("../terminal/screens/Wallet.tsx", import.meta.url), "utf8");
-    assert.match(src, /on \{chainLabel\(grant\.chainId\)\} only/);
-    assert.match(src, /stuck beyond any re-sign/);
+    // i18n: the sentence lives in the catalogue now; pin the key — with its
+    // own-chain argument — at the call site and the wording in EN.
+    assert.match(src, /t\("wallet\.depositNoteA", \{ chain: chainLabel\(grant\.chainId\) \}\)/);
+    assert.match(EN_TEXT, /stuck beyond any re-sign/);
   });
 
   it("THE PARTNER PROMPT NEVER IMPLIES A RE-SIGN MOVES STUCK FUNDS", () => {

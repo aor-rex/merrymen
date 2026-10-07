@@ -5,6 +5,7 @@ import { listSavedWallets, loadGrant } from "@/lib/session";
 import { isAddr, normalizeAddr } from "@/lib/address";
 import { planFromBrowser, sweepFromBrowser, redact, type BrowserWallet } from "@/lib/recover-client";
 import { usePrivyOwner, type PrivyOwner } from "@/terminal/usePrivyOwner";
+import { useT } from "@/lib/i18n";
 
 /**
  * "Get my money out" — the one-click counterpart to `merrymen recover`.
@@ -161,6 +162,7 @@ export function RecoverPanelView({
   const [chainId, setChainId] = useState<number>(MAINNET);
   const [plan, setPlan] = useState<PlanRes | null>(null);
 
+  const t = useT();
   const [to, setTo] = useState("");
   const [busy, setBusy] = useState<null | "checking" | "sweeping">(null);
   const [result, setResult] = useState<SweepRes | null>(null);
@@ -174,7 +176,7 @@ export function RecoverPanelView({
       const r = await fetch("/api/recover");
       setCtx((await r.json()) as Ctx);
     } catch {
-      setCtx({ hasStoredKey: false, hasBundler: false, error: "couldn't reach the recovery service" });
+      setCtx({ hasStoredKey: false, hasBundler: false, error: t("common.recSvcDown") });
     }
     setLoadingCtx(false);
   }
@@ -247,9 +249,7 @@ export function RecoverPanelView({
     setError(null);
     const w = browserWallet();
     if (!w) {
-      setError(
-        "this browser doesn't hold that wallet, so it can't withdraw here. Use `merrymen recover` on the machine with your key.",
-      );
+      setError(t("common.recNoBrowser"));
       return;
     }
     setBusy("checking");
@@ -290,9 +290,7 @@ export function RecoverPanelView({
       } as unknown as PlanRes);
       // The one thing that stops a sweep dead, said BEFORE they press it.
       if (b.needsGas) {
-        setError(
-          `this account has no ETH, and a withdrawal is an on-chain operation it has to pay for. Send a little ETH to ${b.smartAccount} and try again — a few dollars is plenty.`,
-        );
+        setError(t("common.recNeedsGas", { account: b.smartAccount }));
       }
     } catch (e) {
       setError(redact(e, w.ownerKey));
@@ -303,12 +301,12 @@ export function RecoverPanelView({
   async function sweepInBrowser() {
     setError(null);
     if (!isAddr(to)) {
-      setError("enter a valid destination address (0x + 40 hex).");
+      setError(t("common.recBadDest"));
       return;
     }
     const w = browserWallet();
     if (!w) {
-      setError("this browser doesn't hold that wallet.");
+      setError(t("common.recNoWallet"));
       return;
     }
     /**
@@ -332,7 +330,7 @@ export function RecoverPanelView({
       [
         ...classHoldings.map((h) => `${h.amount} ${h.symbol}`),
         ...balances.map((b) => `${b.amount} ${b.symbol}`),
-      ].join(", ") || "the balance";
+      ].join(", ") || t("common.recBalanceFallback");
     // SAID BEFORE THE PRESS, not discovered after. One approval covers one
     // vault, so a balance in the other is real, visible on this screen, and not
     // moving this time — and a confirmation that stayed silent about that would
@@ -342,10 +340,10 @@ export function RecoverPanelView({
       .join(", ");
     if (
       !window.confirm(
-        `Sweep ${list} to ${normalizeAddr(to)}?\n\nThis is real and irreversible. The account keeps a little ETH to pay for gas.` +
-          (alsoHeld
-            ? `\n\nNOT in this sweep: ${alsoHeld}, held in another of your class vaults. Run this again afterwards to move it.`
-            : ""),
+        t("common.recConfirmTitle", { list, to: normalizeAddr(to) }) +
+          "\n\n" +
+          t("common.recConfirmBody") +
+          (alsoHeld ? "\n\n" + t("common.recConfirmAlso", { held: alsoHeld }) : ""),
       )
     ) {
       return;
@@ -376,7 +374,7 @@ export function RecoverPanelView({
   async function checkPasted() {
     setError(null);
     if (!isKey(ownerKey)) {
-      setError("that isn't a 32-byte owner key (0x + 64 hex chars).");
+      setError(t("common.recBadKey"));
       return;
     }
     setBusy("checking");
@@ -387,10 +385,10 @@ export function RecoverPanelView({
         body: JSON.stringify({ mode: "plan", ownerKey: ownerKey.trim(), chainId }),
       });
       const j = (await r.json()) as PlanRes;
-      if (!r.ok || j.error) setError(j.error ?? "couldn't read that wallet.");
+      if (!r.ok || j.error) setError(j.error ?? t("common.recCantRead"));
       else setPlan(j);
     } catch {
-      setError("couldn't reach the recovery service.");
+      setError(t("common.recSvcDownDot"));
     }
     setBusy(null);
   }
@@ -466,7 +464,7 @@ export function RecoverPanelView({
   async function sweep() {
     setError(null);
     if (!isAddr(to)) {
-      setError("enter a valid destination address (0x + 40 hex).");
+      setError(t("common.recBadDest"));
       return;
     }
     // GROUPED BY CUSTODY, not flattened. The vault is emptied by a first
@@ -474,12 +472,12 @@ export function RecoverPanelView({
     // show an owner that a whole contract is being drained.
     const lines: string[] = [];
     if (classHoldings.length) {
-      lines.push("CLASS VAULT" + (classVault ? ` ${classVault}` : ""));
+      lines.push(t("common.recVaultHead") + (classVault ? ` ${classVault}` : ""));
       for (const h of classHoldings) lines.push(`  ${h.amount} ${h.symbol}`);
       lines.push("");
     }
     if (balances.length) {
-      lines.push(`SMART ACCOUNT ${smartAccount ?? ""}`.trimEnd());
+      lines.push(`${t("common.recAcctHead")} ${smartAccount ?? ""}`.trimEnd());
       for (const b of balances) lines.push(`  ${b.amount} ${b.symbol}`);
       lines.push("");
     }
@@ -489,20 +487,20 @@ export function RecoverPanelView({
     // rule. "approximately" because the gas price is read again at execution.
     if (ethLeg) {
       lines.push(
-        "NATIVE ETH",
-        `  approximately ${ethLeg.recoverable} ETH recoverable`,
-        `  reserve remaining on the account approximately ${ethLeg.reserve} ETH`,
+        t("common.recEthHead"),
+        `  ${t("common.recEthRec", { x: ethLeg.recoverable })}`,
+        `  ${t("common.recEthRes", { x: ethLeg.reserve })}`,
         "",
       );
     }
-    lines.push("DESTINATION", `  ${normalizeAddr(to)}`);
+    lines.push(t("common.recConfirmDest"), `  ${normalizeAddr(to)}`);
     const list =
       [...classHoldings.map((h) => `${h.amount} ${h.symbol}`), ...balances.map((b) => `${b.amount} ${b.symbol}`)].join(
         ", ",
-      ) || "the balance";
+      ) || t("common.recBalanceFallback");
     if (
       !window.confirm(
-        `Sweep:\n\n${lines.join("\n")}\n\nThis is real and irreversible. The account keeps a little ETH to pay for gas.`,
+        `${t("common.recConfirmTitle2")}\n\n${lines.join("\n")}\n\n${t("common.recConfirmBody")}`,
       )
     ) {
       return;
@@ -520,46 +518,44 @@ export function RecoverPanelView({
         body: JSON.stringify(body),
       });
       const j = (await r.json()) as SweepRes;
-      if (!r.ok || j.error) setError(j.error ?? "recovery failed.");
+      if (!r.ok || j.error) setError(j.error ?? t("common.recFailed"));
       else setResult(j);
     } catch {
-      setError("couldn't reach the recovery service.");
+      setError(t("common.recSvcDownDot"));
     }
     setBusy(null);
   }
 
   return (
     <div className="panel recover-panel">
-      <div className="section-title">recover funds</div>
+      <div className="section-title">{t("common.recTitle")}</div>
 
       {!open ? (
         <>
           <p className="recover-sub">
-            Your money lives in a smart account, not a MetaMask wallet — so importing the owner key
-            won&apos;t show it. Sweep it back to any address you control, anytime (even after a kill).
+            {t("common.recSub")}
           </p>
           <button className="recover-btn" onClick={() => void expand()}>
-            🏹 recover my funds
+            {t("common.recOpen")}
           </button>
         </>
       ) : loadingCtx ? (
-        <p className="recover-sub">reading your account…</p>
+        <p className="recover-sub">{t("common.recReading")}</p>
       ) : result ? (
         <div className="recover-done">
           {result.txHash ? (
             <>
               <p className="recover-sub">
-                <b>Recovered ✓</b> — {result.balances.map((b) => `${b.amount} ${b.symbol}`).join(", ")} sent to{" "}
+                <b>{t("common.recDoneTitle")}</b> — {t("common.recDoneBody", { list: result.balances.map((b) => `${b.amount} ${b.symbol}`).join(", ") })}{" "}
                 <span className="mono">{short(result.to)}</span>.
               </p>
               {result.skipped?.length ? (
                 <p className="recover-sub">
-                  Left behind, because they refused to transfer:{" "}
-                  {result.skipped.map((s) => s.symbol).join(", ")}.
+                  {t("common.recSkipped", { list: result.skipped.map((s) => s.symbol).join(", ") })}
                 </p>
               ) : null}
               <a className="recover-btn" href={`${result.explorer}/tx/${result.txHash}`} target="_blank" rel="noreferrer">
-                view the transaction ↗
+                {t("common.recViewTx")}
               </a>
             </>
           ) : (
@@ -570,8 +566,7 @@ export function RecoverPanelView({
                their money is out. */
             <>
               <p className="recover-sub">
-                <b>Nothing moved.</b> Every token in this account refused to transfer, so no
-                transaction was sent — your funds are still where they were.
+                <b>{t("common.recNothingTitle")}</b> {t("common.recNothingBody")}
               </p>
               {result.skipped?.length ? (
                 <ul className="recover-sub">
@@ -590,19 +585,18 @@ export function RecoverPanelView({
           {/* Killed/expired: no stored key — ask for the backed-up one. */}
           {ctx && !ctx.hasStoredKey && !plan && privyOwner && (
             <p className="recover-sub">
-              Recovery will be authorised by your signed-in wallet. There is no key to enter — your
-              embedded wallet signs it, and merrymen never sees it.
+              {t("common.recPrivy")}
             </p>
           )}
           {ctx && !ctx.hasStoredKey && !plan && !privyOwner && (
             <>
               <p className="recover-sub">
-                Enter the recovery key you saved when creating this wallet.
+                {t("common.recEnterKey")}
               </p>
               <input
                 className="recover-input mono"
                 type="password"
-                placeholder="owner key (0x…)"
+                placeholder={t("common.recKeyPh")}
                 value={ownerKey}
                 onChange={(e) => setOwnerKey(e.target.value)}
                 autoComplete="off"
@@ -625,7 +619,7 @@ export function RecoverPanelView({
                 </label>
               </div>
               <button className="recover-btn" onClick={() => void (clientSide ? checkInBrowser() : checkPasted())} disabled={busy !== null}>
-                {busy === "checking" ? "reading the wallet…" : "check what's in it"}
+                {busy === "checking" ? t("common.recChecking") : t("common.recCheck")}
               </button>
             </>
           )}
@@ -635,7 +629,7 @@ export function RecoverPanelView({
             <>
               {smartAccount && (
                 <p className="recover-sub">
-                  account{" "}
+                  {t("common.recAccount")}{" "}
                   {explorer ? (
                     <a className="mono" href={`${explorer}/address/${smartAccount}`} target="_blank" rel="noreferrer">
                       {short(smartAccount)} ↗
@@ -643,26 +637,25 @@ export function RecoverPanelView({
                   ) : (
                     <span className="mono">{short(smartAccount)}</span>
                   )}{" "}
-                  · chain {activeChain}
+                  {t("common.recChain", { id: activeChain })}
                 </p>
               )}
 
               {empty ? (
-                <p className="recover-sub">This account is empty — nothing to recover.</p>
+                <p className="recover-sub">{t("common.recEmpty")}</p>
               ) : blind ? (
                 /* NOT "empty". Every balance read failed, which is a different
                    fact — and telling someone their account is empty because an
                    RPC blinked is how they conclude their money is gone. */
                 <p className="recover-sub">
-                  Nothing found — but {unreadable.join(", ")} could not be read. That is NOT a zero
-                  balance. Check the RPC and try again before concluding anything.
+                  {t("common.recBlind", { unread: unreadable.join(", ") })}
                 </p>
               ) : (
                 <>
                   {classHoldings.length > 0 && (
                     <>
                       <p className="recover-sub">
-                        <strong>Class vault</strong>
+                        <strong>{t("common.recVaultTitle")}</strong>
                         {classVault ? <> · <span className="mono">{short(classVault)}</span></> : null}
                       </p>
                       <div className="recover-holdings mono">
@@ -673,14 +666,13 @@ export function RecoverPanelView({
                         ))}
                       </div>
                       <p className="recover-sub">
-                        Held in a separate contract, not in the account. Recovery empties it into the
-                        account first, then moves everything in a second operation.
+                        {t("common.recVaultNote")}
                       </p>
                     </>
                   )}
                   {balances.length > 0 && classHoldings.length > 0 && (
                     <p className="recover-sub">
-                      <strong>Smart account</strong>
+                      <strong>{t("common.recAcctTitle")}</strong>
                     </p>
                   )}
                   <div className="recover-holdings mono">
@@ -692,24 +684,22 @@ export function RecoverPanelView({
                   </div>
                   {ethLeg && (
                     <p className="recover-sub">
-                      <strong>Native ETH</strong> · approximately{" "}
-                      <span className="mono">{ethLeg.recoverable}</span> ETH recoverable, leaving about{" "}
-                      <span className="mono">{ethLeg.reserve}</span> ETH on the account to pay for the
-                      withdrawal itself.
+                      <strong>{t("common.recEthTitle")}</strong>{" "}
+                      {t("common.recEthBody", { rec: ethLeg.recoverable, res: ethLeg.reserve })}
                     </p>
                   )}
 
                   {!canSubmit && (
                     <p className="recover-warn">
-                      Recovery sends an on-chain transaction, so it needs your bundler key. Add a free
-                      Pimlico key in <a href="/settings">settings</a>, then come back.
+                      {t("common.recBundlerPre")} <a href="/settings">{t("shell.settings")}</a>
+                      {t("common.recBundlerPost")}
                     </p>
                   )}
 
                   <input
                     className="recover-input mono"
                     type="text"
-                    placeholder="send to… (an address you control, e.g. MetaMask)"
+                    placeholder={t("common.recToPh")}
                     value={to}
                     onChange={(e) => setTo(e.target.value)}
                     autoComplete="off"
@@ -720,9 +710,8 @@ export function RecoverPanelView({
                       would not press. */}
                   {to.trim().length > 0 && !isAddr(to) && (
                     <p className="recover-warn">
-                      That doesn&rsquo;t look like an address yet — it should be 40 characters of
-                      hex, with or without the <code>0x</code>. Paste the receiving address from
-                      your wallet or exchange.
+                      {t("common.recBadAddrPre")} <code>0x</code>
+                      {t("common.recBadAddrPost")}
                     </p>
                   )}
                   <button
@@ -730,7 +719,7 @@ export function RecoverPanelView({
                     onClick={() => void (clientSide ? sweepInBrowser() : sweep())}
                     disabled={busy !== null || !canSubmit || !isAddr(to)}
                   >
-                    {busy === "sweeping" ? "signing & sending (up to a minute)…" : "recover funds →"}
+                    {busy === "sweeping" ? t("common.recSweeping") : t("common.recSweep")}
                   </button>
                 </>
               )}
@@ -740,8 +729,8 @@ export function RecoverPanelView({
           {error && <p className="recover-err mono">{error}</p>}
 
           <p className="recover-note">
-            Signed by your <b>owner key</b> (not the capped session key), so it works after a kill and
-            isn&apos;t bound by trade limits. Same engine as <span className="mono">merrymen recover</span>.
+            {t("common.recNotePre")} <b>{t("common.recNoteKey")}</b> {t("common.recNotePost")}{" "}
+            <span className="mono">merrymen recover</span>.
           </p>
         </>
       )}

@@ -5,12 +5,9 @@ import { elapsed, useNow } from "./clock";
 import { dayLabel, fullDateTime } from "@/lib/format";
 import type { LiveToken } from "./live";
 import { canOfferPnlCard, OP_WORDS, pnlCardName, pnlChip, sizeText, swapItems, triedLine, type SwapRow, type SwapTab } from "./swaps";
+import { useT } from "@/lib/i18n";
 
-const TABS: { id: SwapTab; label: string; empty: string }[] = [
-  { id: "all", label: "All", empty: "" },
-  { id: "buys", label: "Buys", empty: "No buys in this list." },
-  { id: "sells", label: "Sells", empty: "No sells in this list." },
-];
+const TAB_IDS: SwapTab[] = ["all", "buys", "sells"];
 
 /**
  * ONE SWAPS TABLE for the public profile and the owner's desk.
@@ -43,6 +40,7 @@ export function SwapsTable({
   /** Authenticated owner's desk only; public dollars do not grant export access. */
   allowPnlCards?: boolean;
 }) {
+  const t = useT();
   const [tab, setTab] = useState<SwapTab>("all");
   const [expanded, setExpanded] = useState(false);
   const [card, setCard] = useState<{ tradeId: number; symbol: string } | null>(null);
@@ -56,13 +54,13 @@ export function SwapsTable({
   const nowMs = useNow(5_000);
   const items = swapItems(rows, tab, { tapeFull });
   const shown = expanded ? items : items.slice(0, limit);
-  const empty = TABS.find((t) => t.id === tab)!.empty || emptyTitle;
+  const empty = tab === "buys" ? t("common.swapsEmptyBuys") : tab === "sells" ? t("common.swapsEmptySells") : emptyTitle;
   return (
     <div className="swaps">
       <div className="swaps-tabs" role="group" aria-label="Which trades">
-        {TABS.map((t) => (
-          <button key={t.id} type="button" aria-pressed={tab === t.id} onClick={() => { setTab(t.id); setExpanded(false); }}>
-            {t.label}
+        {TAB_IDS.map((id) => (
+          <button key={id} type="button" aria-pressed={tab === id} onClick={() => { setTab(id); setExpanded(false); }}>
+            {id === "all" ? t("feed.pillAll") : id === "buys" ? t("common.colBuys") : t("common.colSells")}
           </button>
         ))}
       </div>
@@ -73,7 +71,7 @@ export function SwapsTable({
           {shown.map((item) =>
             item.kind === "tried" ? (
               <li key={item.key} className="swap-row is-tried">
-                <span className="swap-pill tried">Tried</span>
+                <span className="swap-pill tried">{t("common.triedPill")}</span>
                 <span className="swap-tried">{triedLine(item, nowMs, (ms) => dayLabel(ms))}</span>
                 <Age at={item.newestAt} nowMs={nowMs} />
               </li>
@@ -86,7 +84,7 @@ export function SwapsTable({
       )}
       {items.length > limit && (
         <button type="button" className="public-more" aria-expanded={expanded} onClick={() => setExpanded((v) => !v)}>
-          {expanded ? "Show fewer" : `Show all ${items.length}`}
+          {expanded ? t("board.showFewer") : t("common.showAll", { count: items.length })}
         </button>
       )}
       {card && cardAvailable && <PnlCardDialog key={card.tradeId} {...card} onClose={() => setCard(null)} />}
@@ -109,6 +107,7 @@ function SwapLine({
   onToken?: (id: string) => void;
   onPnlCard?: (card: { tradeId: number; symbol: string }) => void;
 }) {
+  const t = useT();
   const size = sizeText(row, showMoney);
   if (row.op !== "trade") {
     // A MOVE OF CASH, NOT A SWAP: a vault deposit or withdrawal, or USDG sent
@@ -126,8 +125,8 @@ function SwapLine({
         </span>
         <span className="swap-figures">{size && <strong>{size}</strong>}</span>
         <span className="swap-meta">
-          {row.status === "pending" && <em>Pending</em>}
-          {row.paper && <em>Paper</em>}
+          {row.status === "pending" && <em>{t("common.pendingWord")}</em>}
+          {row.paper && <em>{t("board.paper")}</em>}
           <Age at={row.at} nowMs={nowMs} />
         </span>
       </li>
@@ -140,7 +139,7 @@ function SwapLine({
     <>
       <Coin symbol={row.symbol ?? "?"} logo={token?.logo ?? ""} />
       <span className="swap-coin">
-        <strong>{row.symbol ?? "Token label unavailable"}</strong>
+        <strong>{row.symbol ?? t("profile.noLabel")}</strong>
         {name && name.toUpperCase() !== row.symbol?.toUpperCase() && <small>{name}</small>}
         {row.why && <small className="swap-why" title={row.why}>{row.why}</small>}
       </span>
@@ -148,7 +147,7 @@ function SwapLine({
   );
   return (
     <li className="swap-row">
-      <span className={`swap-pill ${row.side ?? "swap"}`}>{row.side === "buy" ? "Buy" : row.side === "sell" ? "Sell" : "Swap"}</span>
+      <span className={`swap-pill ${row.side ?? "swap"}`}>{row.side === "buy" ? t("profile.buy") : row.side === "sell" ? t("profile.sell") : t("common.swapWord")}</span>
       {token && onToken ? (
         <button type="button" className="swap-token" onClick={() => onToken(token.id)}>{coin}</button>
       ) : (
@@ -159,12 +158,12 @@ function SwapLine({
         {chip && <span className={`swap-pnl ${chip.tone}`}>{chip.text}</span>}
         {onPnlCard && canOfferPnlCard(row) && (
           <button type="button" className="swap-pnl-image" aria-label={`P&L image for ${pnlCardName(row)}`}
-            onClick={() => onPnlCard({ tradeId: row.tradeId!, symbol: pnlCardName(row)! })}>P&amp;L image</button>
+            onClick={() => onPnlCard({ tradeId: row.tradeId!, symbol: pnlCardName(row)! })}>{t("common.pnlImage")}</button>
         )}
       </span>
       <span className="swap-meta">
-        {row.status === "pending" && <em>Pending</em>}
-        {row.paper && <em>Paper</em>}
+        {row.status === "pending" && <em>{t("common.pendingWord")}</em>}
+        {row.paper && <em>{t("board.paper")}</em>}
         <Age at={row.at} nowMs={nowMs} />
       </span>
     </li>

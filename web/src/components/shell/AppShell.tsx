@@ -7,6 +7,7 @@ import { RailAlerts } from "./RailAlerts";
 import { WiredProvider } from "@/components/WiredProvider";
 import { Ticker } from "./Ticker";
 import { NAV, activeHref } from "./nav";
+import { useT } from "@/lib/i18n";
 
 /**
  * The frame every public surface sits in.
@@ -30,6 +31,7 @@ export function AppShell({
   context?: React.ReactNode;
 }) {
   const active = activeHref(usePathname() ?? "/");
+  const t = useT();
 
   return (
     // THE .mm WRAPPER IS LOAD-BEARING, not decoration. Every rule in the new
@@ -49,7 +51,7 @@ export function AppShell({
             <li key={n.href}>
               <Link href={n.href} className={`mm-navlink${active === n.href ? " on" : ""}`}>
                 <Glyph href={n.href} />
-                <span>{n.label}</span>
+                <span>{t(n.key)}</span>
               </Link>
             </li>
           ))}
@@ -64,9 +66,9 @@ export function AppShell({
           {/* Needs a glyph like every other rail item: between 860 and 1180 the
               labels are hidden, and a link with only text collapsed to a
               clipped "S". */}
-          <Link href="/settings" className="mm-navlink sub" title="Settings">
+          <Link href="/settings" className="mm-navlink sub" title={t("shell.settings")}>
             <Gear />
-            <span>Settings</span>
+            <span>{t("shell.settings")}</span>
           </Link>
         </div>
       </nav>
@@ -87,7 +89,7 @@ export function AppShell({
         {NAV.map((n) => (
           <Link key={n.href} href={n.href} className={`mm-tab${active === n.href ? " on" : ""}`}>
             <Glyph href={n.href} />
-            <span>{n.label}</span>
+            <span>{t(n.key)}</span>
           </Link>
         ))}
       </nav>

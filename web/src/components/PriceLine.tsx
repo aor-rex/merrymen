@@ -1,6 +1,9 @@
+"use client";
+
 import { segments, type FeedHistory, type FeedPoint } from "@/lib/read-feed-history";
 import { usd } from "@/lib/format";
 import { dayLabel } from "@/lib/format";
+import { useT } from "@/lib/i18n";
 
 /**
  * The oracle's own series.
@@ -53,19 +56,19 @@ const day = (sec: number) =>
   dayLabel(sec * 1000);
 
 export function PriceLine({ history, symbol }: { history: FeedHistory; symbol: string | null }) {
+  const t = useT();
   // Three states, and only the first is an error.
   if (!history.read) {
     return (
       <div className="mm-readfail">
-        The chain turned down the read for this feed&rsquo;s history, so there is no line below. It
-        retries on its own.
+        {t("common.priceUnreadBody")}
       </div>
     );
   }
   if (history.points.length < 2) {
     return (
       <p className="mm-note">
-        No Chainlink feed publishes a history for this token, so there is no price line to draw.
+        {t("common.priceNoHistory")}
       </p>
     );
   }
@@ -171,10 +174,11 @@ export function PriceLine({ history, symbol }: { history: FeedHistory; symbol: s
           figure, and without this sentence a reader takes the line for one —
           and takes the axis for wall-clock time, which it deliberately is not. */}
       <figcaption>
-        Chainlink feed &mdash; not a market. {placed.length}{" "}
-        {placed.length === 1 ? "session" : "sessions"}, most recent {WINDOW_DAYS} days. Time runs to
-        scale within a session; the hours the feed published nothing are left out rather than drawn
-        across, which is what the breaks are.
+        {t("common.priceCaption", {
+          n: placed.length,
+          sessions: placed.length === 1 ? t("common.sessionOne") : t("common.sessionMany"),
+          days: WINDOW_DAYS,
+        })}
       </figcaption>
     </figure>
   );

@@ -1,6 +1,10 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { describe, it } from "node:test";
+import { EN } from "../../lib/messages/en";
+
+const at = (p: string) => readFileSync(new URL(p, import.meta.url), "utf8");
+const EN_TEXT = Object.values(EN).join("\n");
 
 /**
  * SENTENCES THAT ARE DOING WORK, PINNED BEFORE ANYONE TIDIES THEM.
@@ -14,8 +18,6 @@ import { describe, it } from "node:test";
  * "restore the wording" — it is "does the page still say this, somehow".
  */
 
-const at = (p: string) => readFileSync(new URL(p, import.meta.url), "utf8");
-
 describe("the leaderboard explains its two refusals", () => {
   const PAGE = at("../../terminal/screens/Board.tsx");
 
@@ -25,15 +27,19 @@ describe("the leaderboard explains its two refusals", () => {
     // has funded and never traded is indistinguishable from one nobody has put
     // a penny into — and the second is a dormant account while the first is the
     // exact shape that once published +2643%.
-    assert.match(PAGE, /no capital to measure a return against/);
-    assert.match(PAGE, /no return to measure/);
+    // i18n: the sentence lives in the catalogue now; pin the key at the call
+    // site and the wording in EN.
+    assert.match(PAGE, /t\("board\.measureNote"\)/);
+    assert.match(EN_TEXT, /no capital to measure a return against/);
+    assert.match(EN_TEXT, /no return to measure/);
   });
 
   it("says why a simulated book cannot be divided by a real deposit", () => {
     // This is the incident, stated in the product rather than only in a commit
     // message. It is the reason the refusal exists at all.
-    assert.match(PAGE, /pretend book/);
-    assert.match(PAGE, /publishes a number that never happened/);
+    assert.match(PAGE, /t\("board\.measureNote"\)/);
+    assert.match(EN_TEXT, /pretend book/);
+    assert.match(EN_TEXT, /publishes a number that never happened/);
   });
 });
 
@@ -44,8 +50,9 @@ describe("the token page says how much of the book it is showing", () => {
     // Holdings are opt-in per agent. Without this line a short list reads as
     // the whole one, which understates who is in a token and overstates how
     // much of it we can see.
-    assert.match(PAGE, /\{holderCoverage\.published\} of \{holderCoverage\.total\}/);
-    assert.match(PAGE, /publish their positions/);
+    assert.match(PAGE, /t\("token\.coverage", \{ published: holderCoverage\.published, total: holderCoverage\.total \}\)/);
+    assert.match(PAGE, /t\("token\.coverage"/);
+    assert.match(EN_TEXT, /publish their positions/);
   });
 
   it("and the total counts the agents who did not opt in", async () => {
@@ -61,7 +68,8 @@ describe("the oracle chart says what its axis is", () => {
   it("states that it is a feed and not a market", () => {
     // Every other figure on that page is a market number. Without this the line
     // is read as one, and a Chainlink series is not a price anyone traded at.
-    assert.match(LINE, /not a market/);
+    assert.match(LINE, /t\("common\.priceCaption"/);
+    assert.match(EN_TEXT, /not a market/);
   });
 
   it("states that the axis is compressed and the gaps are real", () => {
@@ -70,8 +78,9 @@ describe("the oracle chart says what its axis is", () => {
     // rejected — a true wall-clock axis — was measured at 28% coverage.
     // Whitespace-tolerant: JSX wraps these across lines and a reformat must not
     // read as the sentence having been deleted.
-    assert.match(LINE, /Time\s+runs\s+to\s+scale\s+within\s+a\s+session/);
-    assert.match(LINE, /left\s+out\s+rather\s+than\s+drawn\s+across/);
+    assert.match(LINE, /t\("common\.priceCaption"/);
+    assert.match(EN_TEXT, /Time\s+runs\s+to\s+scale\s+within\s+a\s+session/);
+    assert.match(EN_TEXT, /left\s+out\s+rather\s+than\s+drawn\s+across/);
   });
 });
 
@@ -83,7 +92,8 @@ describe("the agent profile says what its return is net of", () => {
     // is never counted, so the return silently understates its own cost. This
     // sentence is the only thing distinguishing "net of gas" from "net of some
     // of the gas", and it has to sit with the number it qualifies.
-    assert.match(PAGE, /had gas we could not price/);
-    assert.match(PAGE, /not the full cost/);
+    assert.match(PAGE, /t\("profile\.gasUnpriced"/);
+    assert.match(EN_TEXT, /had gas we could not price/);
+    assert.match(EN_TEXT, /not the full cost/);
   });
 });

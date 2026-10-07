@@ -112,8 +112,12 @@ test("the real-money acknowledgement survives the flip", () => {
   // first thing standing between a new user and a real-funds wall. Deleting it
   // and calling that "one less step" would be trading a warning for a metric.
   const src = readFileSync("web/src/terminal/screens/Wallet.tsx", "utf8");
+  const EN_TEXT = readFileSync("web/src/lib/messages/en.ts", "utf8");
   assert.match(src, /const createBlocked = isMainnet && !mainnetAck;/);
-  assert.match(src, /acknowledge the real-funds warning above first/);
+  // i18n: the sentence lives in the catalogue now; pin the key at the call
+  // site and the wording in EN.
+  assert.match(src, /t\("wallet\.ackRealFunds"\)/);
+  assert.match(EN_TEXT, /acknowledge the real-funds warning above first/);
 });
 
 test("GAS_FLOOR_USDG is still the floor Stage 4 has to clear", () => {

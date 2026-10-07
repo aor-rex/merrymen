@@ -30,6 +30,7 @@
 import { useEffect, useRef, useState } from "react";
 import { ArrowLeft, ShieldCheck } from "lucide-react";
 import { xHandleTag } from "@/lib/x-handle";
+import { useT } from "@/lib/i18n";
 import { BrandLockup } from "../BrandLockup";
 import { readCallback } from "./callback";
 
@@ -42,6 +43,17 @@ type Phase =
   | { kind: "failed"; message: string };
 
 const SETTINGS = "/settings#x-posting";
+
+// The finish helper runs outside the component, so failures arrive as
+// sentinels; the route's own sentences (server-driven, never carrying what X
+// said) pass through verbatim. Anything unrecognised stays as-is.
+function xlate(t: ReturnType<typeof useT>, message: string): string {
+  if (message === "X_UNREACHABLE") return t("connect.xUnreachable");
+  if (message === "X_SIGNIN") return t("connect.xSignin");
+  const status = /^X_STATUS:(\d+)$/.exec(message);
+  if (status) return t("connect.xStatus", { status: status[1]! });
+  return message;
+}
 
 async function finishConnect(code: string, state: string): Promise<Phase> {
   let res: Response;
@@ -56,7 +68,7 @@ async function finishConnect(code: string, state: string): Promise<Phase> {
       signal: AbortSignal.timeout(30_000),
     });
   } catch {
-    return { kind: "failed", message: "Couldn't reach merrymen to finish connecting X. Start again from Settings." };
+    return { kind: "failed", message: "X_UNREACHABLE" };
   }
   const data = (await res.json().catch(() => null)) as
     | { ok?: unknown; username?: unknown; postingEnabled?: unknown; error?: unknown }
@@ -70,14 +82,15 @@ async function finishConnect(code: string, state: string): Promise<Phase> {
     };
   }
   if (res.status === 401) {
-    return { kind: "failed", message: "Sign in to merrymen in this browser, then connect X again from Settings." };
+    return { kind: "failed", message: "X_SIGNIN" };
   }
   // The route's sentences are written for owners and never carry what X said.
   if (typeof data?.error === "string" && data.error) return { kind: "failed", message: data.error };
-  return { kind: "failed", message: `Couldn't finish connecting X (${res.status}). Start again from Settings.` };
+  return { kind: "failed", message: `X_STATUS:${res.status}` };
 }
 
 export function XConnectClient() {
+  const t = useT();
   const [phase, setPhase] = useState<Phase>({ kind: "working" });
   // Once per page load, including under StrictMode's double effect: the URL
   // is scrubbed on the first run, and a second finish could only be refused.
@@ -112,58 +125,56 @@ export function XConnectClient() {
     <div className="terminal-host partner-connect mcp-connect">
       <header className="connect-header">
         <BrandLockup />
-        <span className="connect-header-label"><ShieldCheck size={14} aria-hidden /> Posting on X</span>
+        <span className="connect-header-label"><ShieldCheck size={14} aria-hidden /> {t("connect.xHeader")}</span>
       </header>
       <main className="connect-main">
         <div className="connect-context">
-          <span className="connect-eyebrow">YOUR MERRYMAN, ON X</span>
-          <h1>Connect X.</h1>
-          <p>Your Merryman posts only after you turn posting on in Settings. Each post then waits there under Coming up for at least ten minutes, and you can skip it.</p>
+          <span className="connect-eyebrow">{t("connect.xEyebrow")}</span>
+          <h1>{t("connect.xTitle")}</h1>
+          <p>{t("connect.xIntro")}</p>
         </div>
         <section className="connect-panel" aria-busy={phase.kind === "working"} aria-live="polite">
           {phase.kind === "working" && (
-            <div className="connect-wait" role="status"><span className="connect-spinner" aria-hidden />Finishing with X…</div>
+            <div className="connect-wait" role="status"><span className="connect-spinner" aria-hidden />{t("connect.xWorking")}</div>
           )}
           {phase.kind === "handoff" && (
             <>
-              <h2>Back to the merrymen app…</h2>
-              <p>If the app doesn&apos;t open by itself, <a href={phase.href}>open it here</a>.</p>
+              <h2>{t("connect.xHandoff")}</h2>
+              <p>{t("connect.xHandoffPre")}<a href={phase.href}>{t("connect.xHandoffLink")}</a>.</p>
             </>
           )}
           {phase.kind === "connected" && (
             <>
-              <h2>{phase.handle ? `Connected as ${phase.handle}` : "Connected."}</h2>
+              <h2>{phase.handle ? t("connect.xConnectedAs", { handle: phase.handle }) : t("connect.xConnected")}</h2>
               {phase.postingEnabled ? (
                 <p>
-                  Posting is back on: you allowed your Merryman to post from {phase.handle ?? "this account"} before, so it
-                  posts from it again. Each post waits under Coming up in Settings for at least ten minutes, where you can
-                  skip it or turn posting off.
+                  {t("connect.xBackOn", { handle: phase.handle ?? t("connect.xThisAccount") })}
                 </p>
               ) : (
-                <p>Your Merryman won&apos;t post anything yet. Turn posting on in Settings when you&apos;re ready — you&apos;ll see exactly which account it posts from first.</p>
+                <p>{t("connect.xOff")}</p>
               )}
-              <a className="flow-primary" href={SETTINGS}><ArrowLeft size={16} aria-hidden /> Back to Settings</a>
+              <a className="flow-primary" href={SETTINGS}><ArrowLeft size={16} aria-hidden /> {t("connect.xBackSettings")}</a>
             </>
           )}
           {phase.kind === "declined" && (
             <>
-              <h2>You didn&apos;t connect an X account.</h2>
-              <p>Nothing was saved. You can connect one any time from Settings.</p>
-              <a className="flow-primary" href={SETTINGS}><ArrowLeft size={16} aria-hidden /> Back to Settings</a>
+              <h2>{t("connect.xDeclined")}</h2>
+              <p>{t("connect.xDeclinedNote")}</p>
+              <a className="flow-primary" href={SETTINGS}><ArrowLeft size={16} aria-hidden /> {t("connect.xBackSettings")}</a>
             </>
           )}
           {phase.kind === "nothing" && (
             <>
-              <h2>Nothing to finish here.</h2>
-              <p>This page finishes connecting an X account. Start from Settings.</p>
-              <a className="flow-primary" href={SETTINGS}><ArrowLeft size={16} aria-hidden /> Go to Settings</a>
+              <h2>{t("connect.xNothing")}</h2>
+              <p>{t("connect.xNothingNote")}</p>
+              <a className="flow-primary" href={SETTINGS}><ArrowLeft size={16} aria-hidden /> {t("connect.xGoSettings")}</a>
             </>
           )}
           {phase.kind === "failed" && (
             <>
-              <h2>X isn&apos;t connected.</h2>
-              <div className="connect-error" role="alert"><p>{phase.message}</p></div>
-              <a className="flow-primary" style={{ marginTop: 20 }} href={SETTINGS}><ArrowLeft size={16} aria-hidden /> Back to Settings</a>
+              <h2>{t("connect.xFailed")}</h2>
+              <div className="connect-error" role="alert"><p>{xlate(t, phase.message)}</p></div>
+              <a className="flow-primary" style={{ marginTop: 20 }} href={SETTINGS}><ArrowLeft size={16} aria-hidden /> {t("connect.xBackSettings")}</a>
             </>
           )}
         </section>

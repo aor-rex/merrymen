@@ -194,20 +194,25 @@ describe("what the refactor must not have loosened", () => {
       path.join(__dirname, "..", "..", "web", "src", "components", "RecoverPanel.tsx"),
       "utf8",
     );
+    const EN_TEXT = readFileSync(
+      path.join(__dirname, "..", "..", "web", "src", "lib", "messages", "en.ts"),
+      "utf8",
+    );
     const panel = code(PANEL);
     const keyBranch = panel.indexOf("!plan && !privyOwner");
-    const checkButton = panel.indexOf("check what's in it");
-    const sharedBranch = panel.lastIndexOf("!ctx.hasStoredKey && !plan &&", checkButton);
-    assert.ok(keyBranch >= 0 && checkButton >= 0, "both branches must exist");
+    const checkKey = panel.indexOf("common.recCheck");
+    const sharedBranch = panel.lastIndexOf("!ctx.hasStoredKey && !plan &&", checkKey);
+    assert.ok(keyBranch >= 0 && checkKey >= 0, "both branches must exist");
     assert.ok(
       sharedBranch > keyBranch,
       "the check button must live in a branch that does NOT exclude privyOwner",
     );
     assert.doesNotMatch(
-      panel.slice(keyBranch, checkButton),
-      /check what's in it/,
+      panel.slice(keyBranch, sharedBranch),
+      /recCheck/,
       "the button must not be inside the !privyOwner branch",
     );
+    assert.match(EN_TEXT, /check what's in it/);
   });
 
   it("the EIP-1193 hazard is written down where the next person will look", () => {

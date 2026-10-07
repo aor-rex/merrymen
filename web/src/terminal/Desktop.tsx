@@ -31,16 +31,26 @@ import {
 import { positionFigures, positionsOf } from "./account";
 import { BalanceFigure } from "./studio";
 import { strategyName } from "./strategy";
+import { useT } from "@/lib/i18n";
 import { Feed } from "./screens/Feed";
 import { Board, tradeLine } from "./screens/Board";
 
 export type SidebarSection = "markets" | "agents" | "feed" | "board";
-const SECTIONS: { id: SidebarSection; label: string }[] = [
-  { id: "markets", label: "Markets" },
-  { id: "agents", label: "Agents" },
-  { id: "feed", label: "Feed" },
-  { id: "board", label: "Leaderboard" },
+const SECTIONS: { id: SidebarSection }[] = [
+  { id: "markets" },
+  { id: "agents" },
+  { id: "feed" },
+  { id: "board" },
 ];
+
+function sectionLabel(id: SidebarSection, t: ReturnType<typeof useT>): string {
+  switch (id) {
+    case "markets": return t("common.navMarkets");
+    case "agents": return t("common.navAgents");
+    case "feed": return t("shell.navFeed");
+    case "board": return t("shell.navLeaderboard");
+  }
+}
 
 type Actions = {
   onScreen: (screen: Screen) => void;
@@ -58,6 +68,7 @@ export function DesktopHeader({
   const room = useGroupChatSupported();
   // The way into /connect/mcp; hidden on a self-hosted install, which has none.
   const assistants = useConnectAssistantOffered();
+  const t = useT();
   return (
     <header className="desktop-header">
       <button
@@ -79,11 +90,11 @@ export function DesktopHeader({
         onClick={() => onScreen({ kind: "search" })}
       >
         <Search size={17} />
-        <span>Search tokens or agents</span>
+        <span>{t("search.placeholder")}</span>
       </button>
       <div className="desktop-header-account">
-        {room && <Link className="desktop-settings-link" href="/groupchat">Group chat</Link>}
-        <Link className="desktop-settings-link" href="/settings">Settings</Link>
+        {room && <Link className="desktop-settings-link" href="/groupchat">{t("groupchat.title")}</Link>}
+        <Link className="desktop-settings-link" href="/settings">{t("shell.settings")}</Link>
         {/* THE LABEL CARRIES THE TRUTH, not a caption under it. Someone who has
             already read "$964" as their deposit does not go on to read a
             footnote. See packages/core/src/autonomy.ts. */}
@@ -95,17 +106,17 @@ export function DesktopHeader({
           className="desktop-fund"
           onClick={() => onScreen({ kind: "deposit" })}
         >
-          {hasAgent ? "Add funds" : "Your account"}
+          {hasAgent ? t("agent.addFunds") : t("common.yourAccount")}
         </button>
         <details className="desktop-account-menu" ref={accountMenu} onBlur={event=>{if(!event.currentTarget.contains(event.relatedTarget as Node|null))closeAccountMenu();}} onKeyDown={event=>{if(event.key==="Escape"){closeAccountMenu();accountMenu.current?.querySelector("summary")?.focus();}}}>
-          <summary><Face name={mine.name} slug={mine.slug}/><span>Account</span><ChevronDown size={14}/></summary>
+          <summary><Face name={mine.name} slug={mine.slug}/><span>{t("you.account")}</span><ChevronDown size={14}/></summary>
           <nav aria-label="Account navigation" onClick={closeAccountMenu}>
-            <Link href="/you">Portfolio</Link>
-            <Link href="/settings">Settings</Link>
-            <Link href="/grant">Wallet & permissions</Link>
-            <Link href="/limits">Trading limits</Link>
-            {assistants && <Link href={CONNECT_ASSISTANT_HREF}>Connect to Claude</Link>}
-            {!hasAgent && <Link href="/create">Create an agent</Link>}
+            <Link href="/you">{t("agent.portfolio")}</Link>
+            <Link href="/settings">{t("shell.settings")}</Link>
+            <Link href="/grant">{t("you.walletPermissions")}</Link>
+            <Link href="/limits">{t("you.tradingLimits")}</Link>
+            {assistants && <Link href={CONNECT_ASSISTANT_HREF}>{t("you.connectClaude")}</Link>}
+            {!hasAgent && <Link href="/create">{t("common.createAnAgent")}</Link>}
           </nav>
         </details>
       </div>
@@ -139,6 +150,7 @@ export function DesktopSidebar({
   section: SidebarSection;
   onSection: (section: SidebarSection) => void;
 }) {
+  const t = useT();
   const [filter, setFilter] = useState("all");
   const watchlist = useWatchlist();
   const [sort, setSort] = useState<"name" | "change">("name");
@@ -185,7 +197,7 @@ export function DesktopSidebar({
               document.getElementById(`explore-tab-${target.id}`)?.focus();
             }}
           >
-            {item.label}
+            {sectionLabel(item.id, t)}
           </button>
         ))}
       </div>
@@ -198,31 +210,31 @@ export function DesktopSidebar({
       >
         <div className="desktop-market-heading">
           <h2>Robinhood Chain</h2>
-          <span>{list.length} {list.length === 1 ? "token" : "tokens"}</span>
+          <span>{list.length === 1 ? t("common.tokenCountOne", { count: list.length }) : t("common.tokenCountMany", { count: list.length })}</span>
         </div>
         <div className="desktop-market-tabs">
           <button
             aria-pressed={filter === "all"}
             onClick={() => setFilter("all")}
           >
-            All tokens
+            {t("common.allTokens")}
           </button>
           <button
             aria-pressed={filter === "held"}
             onClick={() => setFilter("held")}
           >
-            Your holdings
+            {t("common.yourHoldings")}
           </button>
-          <button aria-pressed={filter === "watch"} onClick={() => setFilter("watch")}>Watchlist</button>
+          <button aria-pressed={filter === "watch"} onClick={() => setFilter("watch")}>{t("common.watchlist")}</button>
           <button
             className="desktop-sort"
             title={
-              sort === "name" ? "Sort by daily change" : "Sort alphabetically"
+              sort === "name" ? t("common.sortTitleChange") : t("common.sortTitleAlpha")
             }
             aria-label={
               sort === "name"
-                ? "Sort markets by daily change"
-                : "Sort markets alphabetically"
+                ? t("common.sortMarketsChange")
+                : t("common.sortMarketsAlpha")
             }
             onClick={() =>
               setSort((value) => (value === "name" ? "change" : "name"))
@@ -259,14 +271,14 @@ export function DesktopSidebar({
           {!list.length && (
             <p className="meta">
               {filter === "watch"
-                ? "Watch a token to find it here."
+                ? t("common.watchEmpty")
                 : filter === "held"
-                  ? "No tokens held yet."
+                  ? t("common.heldEmpty")
                   : reads.market === "unread"
-                    ? "Loading markets…"
+                    ? t("common.marketsLoading")
                     : reads.market === "unreadable"
-                      ? "Couldn’t read the market list just now."
-                      : "No tokens are listed."}
+                      ? t("common.marketsUnreadable")
+                      : t("common.marketsEmpty")}
             </p>
           )}
         </div>
@@ -279,8 +291,8 @@ export function DesktopSidebar({
         hidden={section !== "agents"}
       >
         <div className="desktop-market-heading">
-          <h2>Your agents</h2>
-          <span>{hasAgent ? "1 agent" : "0 agents"}</span>
+          <h2>{t("common.yourAgents")}</h2>
+          <span>{hasAgent ? t("you.agentCount") : t("common.agentCountMany", { count: 0 })}</span>
         </div>
         {hasAgent && <button className="sidebar-agent" data-tour="your-agent" onClick={() => onTab("agent")}>
           <Face name={mine.name} slug={mine.slug} />
@@ -290,11 +302,11 @@ export function DesktopSidebar({
           </span>
           <span>
             <strong>{money(mine.equity)}</strong>
-            <small>Open chat</small>
+            <small>{t("common.openChat")}</small>
           </span>
         </button>}
         <div className="desktop-market-heading">
-          <h2>Discover agents</h2>
+          <h2>{t("common.discoverAgents")}</h2>
           <span>{agents.filter((a) => a.slug !== mine.slug).length}</span>
         </div>
         <div className="desktop-market-list">
@@ -315,9 +327,9 @@ export function DesktopSidebar({
                     constant (publicGlance) printed once per agent, which no
                     change to any agent could ever alter. See tradeLine.
                   */}
-                  <small>{tradeLine(a)}</small>
+                  <small>{tradeLine(a, t)}</small>
                 </span>
-                <span aria-label={`Return ${pctBps((a.mode === "paper" ? a.paperPnlBps ?? null : a.pnlBps))}, ${tradeLine(a)}`}>
+                <span aria-label={`Return ${pctBps((a.mode === "paper" ? a.paperPnlBps ?? null : a.pnlBps))}, ${tradeLine(a, t)}`}>
                   <strong
                     className={
                       (a.mode === "paper" ? a.paperPnlBps ?? null : a.pnlBps) == null
@@ -393,13 +405,14 @@ export function DesktopPortfolio({
   perTrade: number | null;
   perDay: number | null;
 }) {
+  const t = useT();
   return (
     <aside className="desktop-portfolio" aria-label="Your portfolio">
       <section>
         <div className="desktop-section-heading">
-          <h2>Your agent</h2>
+          <h2>{t("you.yourAgent")}</h2>
           <span className={`desktop-running ${stopped ? "paused" : ""}`}>
-            {mine.statusLabel ?? "Offline"}
+            {mine.statusLabel ?? t("agent.offline")}
           </span>
         </div>
         <button className="desktop-agent-id" onClick={() => onTab("agent")}>
@@ -416,16 +429,16 @@ export function DesktopPortfolio({
         <p className={deltaClass(mine.chg24)}>
           {mine.chg24 == null
             ? "—"
-            : `${mine.chg24 < 0 ? "−" : "+"}${money(Math.abs(mine.chg24))} today`}
+            : t("agent.changeToday", { value: `${mine.chg24 < 0 ? "−" : "+"}${money(Math.abs(mine.chg24))}` })}
         </p>
         <div className="desktop-money-actions">
           <button onClick={() => onScreen({ kind: "deposit" })}>
             <ArrowDownLeft size={15} />
-            Add funds
+            {t("agent.addFunds")}
           </button>
           <button onClick={() => onScreen({ kind: "withdraw" })}>
             <ArrowUpRight size={15} />
-            Withdraw
+            {t("agent.withdraw")}
           </button>
         </div>
         <div className={mine.autonomy.simulated ? "desktop-cash is-simulated" : "desktop-cash"}>
@@ -486,22 +499,22 @@ export function DesktopPortfolio({
       {selectedToken && (
         <section className="desktop-token-context">
           <div className="desktop-section-heading">
-            <h2>About {selectedToken.symbol}</h2>
+            <h2>{t("common.aboutToken", { name: selectedToken.symbol })}</h2>
             <Coin symbol={selectedToken.symbol} logo={selectedToken.logo} />
           </div>
           <p>{selectedToken.name}</p>
           <div className="desktop-cash">
-            <span>Asset</span>
+            <span>{t("common.assetLabel")}</span>
             <strong>
               {selectedToken.kind === "etf"
-                ? "Tokenized ETF"
+                ? t("common.assetEtf")
                 : selectedToken.kind === "memecoin"
-                  ? "Token"
-                  : "Tokenized stock"}
+                  ? t("profile.tokenFallback")
+                  : t("common.assetStock")}
             </strong>
           </div>
           <div className="desktop-cash">
-            <span>Session change</span>
+            <span>{t("common.sessionChange")}</span>
             <strong
               className={deltaClass(selectedToken.change24hPct)}
             >
@@ -509,17 +522,17 @@ export function DesktopPortfolio({
             </strong>
           </div>
           <div className="desktop-cash">
-            <span>Your position</span>
+            <span>{t("common.yourPosition")}</span>
             <strong>
               {positionsOf(mine).find((p) => p.symbol === selectedToken.symbol)
-                ?.detail ?? "Not held"}
+                ?.detail ?? t("common.notHeld")}
             </strong>
           </div>
         </section>
       )}
       <section>
         <div className="desktop-section-heading">
-          <h2>Positions</h2>
+          <h2>{t("profile.positions")}</h2>
           <span>{positionsOf(mine).length}</span>
         </div>
         {positionsOf(mine).map((p) => {
@@ -545,7 +558,7 @@ export function DesktopPortfolio({
       </section>
       <section>
         <div className="desktop-section-heading">
-          <h2>Trading limits</h2>
+          <h2>{t("you.tradingLimits")}</h2>
           <button
             aria-label="Edit trading limits"
             onClick={() => onScreen({ kind: "limits" })}
@@ -554,15 +567,15 @@ export function DesktopPortfolio({
           </button>
         </div>
         <div className="desktop-cash">
-          <span>Per trade</span>
+          <span>{t("create.labelPerTrade")}</span>
           <strong>{money(perTrade)}</strong>
         </div>
         <div className="desktop-cash">
-          <span>Per day</span>
+          <span>{t("create.labelPerDay")}</span>
           <strong>{money(perDay)}</strong>
         </div>
         <button className="desktop-chat-link" onClick={() => onTab("agent")}>
-          Chat with {mine.name}
+          {t("common.chatWith", { name: mine.name })}
           <ArrowUpRight size={15} />
         </button>
       </section>

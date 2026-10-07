@@ -4,6 +4,9 @@ import { describe, it } from "node:test";
 
 import type { Thesis } from "../../../../terminal/live";
 import { seatsOf } from "../../../../terminal/token-seats";
+import { EN } from "../../../../lib/messages/en";
+
+const EN_TEXT = Object.values(EN).join("\n");
 
 /**
  * WHAT THE TOKEN PAGE IS ALLOWED TO SAY.
@@ -50,7 +53,10 @@ describe("the strip only prints figures it has", () => {
 
   it("never shows an on-curve coin's reserve as depth", () => {
     // A fresh curve reports about $4,100 of reserve while holding none of it.
-    assert.match(FACTS, /onCurve \?[\s\S]{0,120}?pre-graduation/);
+    // i18n: the sentence lives in the catalogue now; pin the key at the call
+    // site and the wording in EN.
+    assert.match(FACTS, /onCurve \?[\s\S]{0,120}?t\("common\.preGraduation"\)/);
+    assert.match(EN_TEXT, /pre-graduation/);
   });
 
   it("has no 4H cell, because the index has no 4H bucket", () => {
@@ -64,7 +70,8 @@ describe("the strip only prints figures it has", () => {
   it("distinguishes a token with no feed from a read that failed", () => {
     // "no feed" is a fact about the token. A dash is a fact about us.
     assert.match(FACTS, /const noFeed =/);
-    assert.match(FACTS, /noFeed \?[\s\S]{0,120}?no feed/);
+    assert.match(FACTS, /noFeed \?[\s\S]{0,120}?t\("common\.noFeed"\)/);
+    assert.match(EN_TEXT, /no feed/);
   });
 
   it("checks UNREADABLE before ABSENT", () => {
@@ -81,7 +88,8 @@ describe("the strip only prints figures it has", () => {
     // What we hold is page one of three feeds, not the index's knowledge, so
     // "not indexed" would be a claim we are in no position to make.
     assert.ok(!/not indexed/i.test(FACTS_CODE));
-    assert.match(FACTS, /trending, new or top lists/);
+    assert.match(FACTS, /t\("common\.factsAbsentBody"\)/);
+    assert.match(EN_TEXT, /trending, new or top lists/);
   });
 });
 
@@ -133,9 +141,10 @@ describe("the timeline says why it is empty", () => {
     // ledger keeps" is a positive claim about ledger RETENTION. It used to be
     // printed whenever the list was empty, including when the query had thrown.
     const gate = TIMELINE.indexOf("if (!fillsRead)");
-    const claim = TIMELINE.indexOf("older than what the ledger keeps");
+    const claim = TIMELINE.indexOf("common.entriesEmptyBody");
     assert.ok(gate > 0 && claim > 0);
     assert.ok(gate < claim, "the unread case must be checked first");
+    assert.match(EN_TEXT, /older than what the ledger keeps/);
   });
 
   it("fillsRead is set only after the query returns", () => {
@@ -195,7 +204,8 @@ describe("the page does not attribute words to the wrong token", () => {
     // An agent with no slug cannot be looked up at all. Printing "nothing said"
     // for it puts words in its mouth on the strength of a failed join.
     assert.deepEqual(seatsOf([holder(null), holder("robin")], [said], "TSLA", false).map((s) => s.slug), ["robin"]);
-    assert.match(SCREEN, /symbolClash &&[\s\S]{0,120}reasoning cannot be matched/);
+    assert.match(SCREEN, /symbolClash &&[\s\S]{0,120}t\("token\.clash"\)/);
+    assert.match(EN_TEXT, /reasoning cannot be matched/);
   });
 });
 

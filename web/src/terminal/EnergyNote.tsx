@@ -4,6 +4,7 @@ import { useState } from "react";
 import { ENERGY } from "@merrymen/core";
 import { count, usd } from "@/lib/format";
 import { meterBar, type EnergyRemedies, type EnergyView } from "./energy-view";
+import { useT } from "@/lib/i18n";
 
 /**
  * THE AGENT'S ENERGY, ON THE DESK — drawn from the worker's own report.
@@ -56,6 +57,7 @@ export function EnergyNote({
   onAsk: () => void;
   onResign: () => void;
 }) {
+  const t = useT();
   const [copy, setCopy] = useState<"idle" | "copied" | "error">("idle");
   if (view.kind === "none") return null;
   const full = count(ENERGY.fullTokens);
@@ -64,36 +66,31 @@ export function EnergyNote({
     if (view.kind === "unread") {
       return (
         <section className="desk-energy" role="status">
-          <p>
-            I couldn&apos;t read the $MERRYMEN balances yet, so I&apos;m on the reduced allowance
-            until I can. That&apos;s our read failing, not your wallet.
-          </p>
+          <p>{t("common.energyUnread")}</p>
         </section>
       );
     }
     const reviews = view.reviews;
     const entries = view.entries;
     const used = [
-      reviews ? `${count(reviews.used)} of ${count(reviews.allowed)} AI reviews` : null,
-      entries ? `${count(entries.used)} of ${count(entries.allowed)} new trades` : null,
+      reviews ? t("common.energyReviewsUsed", { used: count(reviews.used), allowed: count(reviews.allowed) }) : null,
+      entries ? t("common.energyEntriesUsed", { used: count(entries.used), allowed: count(entries.allowed) }) : null,
     ].filter(Boolean);
     const bars = [
-      { label: "AI reviews used today", bar: meterBar(reviews) },
-      { label: "New trades used today", bar: meterBar(entries) },
+      { label: t("common.energyReviewsLabel"), bar: meterBar(reviews) },
+      { label: t("common.energyEntriesLabel"), bar: meterBar(entries) },
     ].filter((b) => b.bar !== null);
     return (
       <section className="desk-energy" role="status">
         <p>
-          Low energy: without {full} $MERRYMEN between your wallet and my account I run on about a
-          tenth of a standard day{used.length > 0 ? ` — ${used.join(" and ")} used today` : ""}. It
-          resets at 00:00 UTC.
+          {t("common.energyLow", { full, used: used.length > 0 ? t("common.energyUsedToday", { list: used.join(t("wallet.listAnd")) }) : "" })}
         </p>
         {/* NO BAR AGAINST AN ALLOWANCE NOBODY READ — the You screen's rule. */}
         {bars.map((b) => (
           <progress key={b.label} aria-label={b.label} value={b.bar!.used} max={b.bar!.allowed} />
         ))}
         <button type="button" onClick={onDeposit}>
-          How to top up →
+          {t("common.topUpHow")}
         </button>
       </section>
     );
@@ -111,63 +108,55 @@ export function EnergyNote({
 
   return (
     <section className="desk-energy spent" role="status">
-      <strong>Energy spent for today — I pick up again at 00:00 UTC.</strong>
-      <p>
-        Without {full} $MERRYMEN between your wallet and my account I get about a tenth of a standard
-        day&apos;s AI reviews and new trades. Stop-losses, take-profits and your own orders still run; my own
-        AI reviews — including of my open positions — are paced along with the rest.
-      </p>
+      <strong>{t("common.energySpentTitle")}</strong>
+      <p>{t("common.energySpentBody", { full })}</p>
       {view.kind === "unread" ? (
-        <p>I couldn&apos;t read the $MERRYMEN balances — that&apos;s our read failing, not your wallet.</p>
+        <p>{t("common.energyUnreadShort")}</p>
       ) : view.total !== null ? (
         <p>
-          {view.noWallet ? "My account holds" : "You and I hold"} {count(view.total)} $MERRYMEN — {count(view.short)} short.
+          {t("common.energyHoldLine", { who: view.noWallet ? t("common.energyHoldMine") : t("common.energyHoldOurs"), total: count(view.total), short: count(view.short) })}
         </p>
       ) : null}
       {remedies.sendToAgent && account ? (
         <>
-          <p>Send $MERRYMEN on Robinhood Chain to my account:</p>
+          <p>{t("common.energySendHere")}</p>
           <code className="funding-address">{account}</code>
           <button type="button" onClick={() => void copyAddress()}>
-            {copy === "copied" ? "Address copied" : "Copy address"}
+            {copy === "copied" ? t("common.addressCopied") : t("common.copyAddress")}
           </button>
-          {copy === "error" && <p role="alert">Could not copy. Select the address above to copy it.</p>}
+          {copy === "error" && <p role="alert">{t("common.copyFailedSelect")}</p>}
           {remedies.usdg === "ready" && (
             <>
               <p>
-                Or send USDG to that address and ask me to get my $MERRYMEN — you&apos;ll confirm the
-                amount first
-                {estimateUsdg !== null ? ` (about ${usd(estimateUsdg)} of USDG at the pool's current rate)` : ""}.
+                {t("common.energyUsdgReady", { estimate: estimateUsdg !== null ? t("common.energyEstimate", { amount: usd(estimateUsdg) }) : "" })}
               </p>
               <button type="button" onClick={onAsk}>
-                Ask me to get it
+                {t("common.energyAskMe")}
               </button>
             </>
           )}
           {remedies.usdg === "paper" && (
             <p>
-              I&apos;m in Paper mode, so I won&apos;t spend real USDG on it — send $MERRYMEN, or turn
-              on Live trading first.
+              {t("common.energyPaper")}
             </p>
           )}
           {remedies.usdg === "resign" && (
             <>
-              <p>My key can&apos;t buy it yet — renew my permission first; revocation requires network fees.</p>
+              <p>{t("common.energyResign")}</p>
               <button type="button" onClick={onResign}>
-                Re-sign my permission →
+                {t("common.resignPermission")}
               </button>
             </>
           )}
         </>
       ) : remedies.usdg === "not-mainnet" ? (
         <p>
-          My account is on another network, so $MERRYMEN sent to it would not count — keep {full} on
-          Robinhood Chain in your own wallet instead.
+          {t("common.energyOtherNetwork", { full })}
         </p>
       ) : (
-        <p>Keep $MERRYMEN on Robinhood Chain in your own wallet — it counts.</p>
+        <p>{t("common.energyKeepOwn")}</p>
       )}
-      <p>Or change nothing — I carry on at this pace.</p>
+      <p>{t("common.energyChangeNothingDesk")}</p>
     </section>
   );
 }

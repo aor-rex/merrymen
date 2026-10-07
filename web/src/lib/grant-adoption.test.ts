@@ -26,6 +26,9 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import { readFileSync } from "node:fs";
+import { EN } from "./messages/en";
+
+const EN_TEXT = Object.values(EN).join("\n");
 
 const wallet = () => readFileSync(new URL("../terminal/screens/Wallet.tsx", import.meta.url), "utf8");
 const route = () => readFileSync(new URL("../app/api/grants/route.ts", import.meta.url), "utf8");
@@ -94,10 +97,15 @@ describe("what the endpoint may hand over", () => {
     // unable to LOOK was our screen refusing to render what it had.
     const src = wallet();
     assert.match(src, /const resignBy: "owner-key" \| "privy" \| null = grant\?\.demoOwnerPrivateKey/);
-    assert.match(src, /This browser does not hold the owner key for/);
-    assert.match(src, /Re-signing \{short\(grant\.smartAccount\)\} needs the login that owns it/);
+    // i18n: the sentences live in the catalogue now; pin the keys at the call
+    // site and the wording in EN.
+    assert.match(src, /t\("wallet\.noKeyBody"/);
+    assert.match(EN_TEXT, /This browser does not hold the owner key for/);
+    assert.match(src, /t\("wallet\.privyResign"/);
+    assert.match(EN_TEXT, /Re-signing \{account\} needs the login that owns it/);
     // And the route out is on the same screen.
-    assert.match(src, /switch to another wallet/);
+    assert.match(src, /t\("wallet\.switchWallet"\)/);
+    assert.match(EN_TEXT, /switch to another wallet/);
   });
 });
 

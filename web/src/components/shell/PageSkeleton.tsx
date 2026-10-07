@@ -1,4 +1,5 @@
 import "@/styles/feed.css";
+import { useT } from "@/lib/i18n";
 
 /**
  * WHAT A NAVIGATION LOOKS LIKE BEFORE THE SERVER ANSWERS.
@@ -34,9 +35,10 @@ export function PageSkeleton({
    */
   strip?: number;
 }) {
+  const t = useT();
   return (
     <div className="mm-wrap" aria-busy="true" aria-live="polite">
-      <span className="mm-sr">Loading</span>
+      <span className="mm-sr">{t("common.loading")}</span>
 
       {/* The header block: a title and its subline. */}
       <div className="mm-skel-head">

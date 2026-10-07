@@ -1,5 +1,6 @@
 import { useState } from "react";
 import { agentNameForSlug, DEFAULT_AGENT_NAME } from "@merrymen/core";
+import { useT } from "@/lib/i18n";
 
 /**
  * "NAME YOUR AGENT", ONE TAP, ON THE AGENT'S OWN HEADER.
@@ -42,6 +43,7 @@ export function NameChip({
   slug: string | null;
   onSettings: () => void;
 }) {
+  const t = useT();
   const [state, setState] = useState<{ kind: "offer" } | { kind: "saving" } | { kind: "saved"; name: string } | { kind: "error"; why: string }>({
     kind: "offer",
   });
@@ -61,7 +63,7 @@ export function NameChip({
   if (state.kind === "saved") {
     return (
       <p className="meta" role="status">
-        Named {state.name}. It answers to it from its next tick.
+        {t("common.namedIt", { name: state.name })}
       </p>
     );
   }
@@ -78,12 +80,12 @@ export function NameChip({
       });
       if (!put.ok) {
         const j = (await put.json().catch(() => null)) as { errors?: string[]; error?: string } | null;
-        throw new Error(j?.errors?.join(" ") || j?.error || `that was refused (${put.status})`);
+        throw new Error(j?.errors?.join(" ") || j?.error || t("common.nameRefused", { status: put.status }));
       }
       setState({ kind: "saved", name: agentName });
     } catch (e) {
       // A thrown fetch is a network failure, not a refusal, and says so.
-      const why = e instanceof TypeError ? "The name could not be saved — check your connection and try again." : e instanceof Error ? e.message : "The name could not be saved.";
+      const why = e instanceof TypeError ? t("common.nameConnFailed") : e instanceof Error ? e.message : t("common.nameSaveFailed");
       setState({ kind: "error", why });
     }
   };
@@ -102,21 +104,21 @@ export function NameChip({
       {suggestion ? (
         <>
           <button type="button" className="ask-chip" disabled={state.kind === "saving"} onClick={() => void save(suggestion)}>
-            {`Name your agent: ${suggestion}`}
+            {t("common.nameOffer", { suggestion })}
           </button>
           <button type="button" className="ask-chip" onClick={onSettings}>
-            Choose my own
+            {t("common.chooseOwn")}
           </button>
         </>
       ) : (
         // No public id yet, so no seed for a suggestion — the name field is
         // the only honest offer.
         <button type="button" className="ask-chip" onClick={onSettings}>
-          Name your agent
+          {t("common.nameYourAgent")}
         </button>
       )}
       <button type="button" className="ask-chip" onClick={keepIt}>
-        {`Keep ${DEFAULT_AGENT_NAME}`}
+        {t("common.keepName", { name: DEFAULT_AGENT_NAME })}
       </button>
       {state.kind === "error" && (
         <p className="meta" role="alert">

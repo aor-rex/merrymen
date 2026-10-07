@@ -1,6 +1,7 @@
 import { useMemo, useState } from "react";
 import { coinPrice, lastLine, pctBps, type LiveAgent, type LiveToken } from "../live";
 import { Coin, Face, Empty, NameBlock } from "../ui";
+import { useT } from "@/lib/i18n";
 
 export function Search({
   tokens,
@@ -16,6 +17,7 @@ export function Search({
   onProfile: (slug: string) => void;
 }) {
   const [q, setQ] = useState("");
+  const t = useT();
   const query = q.trim().toLowerCase();
   const toks = useMemo(
     () =>
@@ -45,7 +47,7 @@ export function Search({
           className="search"
           autoFocus
           aria-label="Search tokens or agents"
-          placeholder="Search tokens or agents"
+          placeholder={t("search.placeholder")}
           value={q}
           onChange={(e) => setQ(e.target.value)}
         />
@@ -70,7 +72,7 @@ export function Search({
           <span className="px">{coinPrice(t.priceUsd)}</span>
         </button>
       ))}
-      {query && ags.length === 0 && toks.length === 0 && <Empty kind="search" title="Nothing with that name."/>}
+      {query && ags.length === 0 && toks.length === 0 && <Empty kind="search" title={t("search.emptyTitle")}/>}
     </div>
   );
 }

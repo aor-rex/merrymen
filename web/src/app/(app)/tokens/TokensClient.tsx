@@ -4,6 +4,7 @@ import { useEffect, useState } from "react";
 import { PageHeader } from "@/components/shell/PageHeader";
 import { FreshCard, MarketCard, chainGap } from "@/components/TokenCards";
 import type { Payload } from "@/lib/read-discoveries";
+import { useT } from "@/lib/i18n";
 
 /**
  * What is launching, and what is trading.
@@ -26,6 +27,7 @@ import type { Payload } from "@/lib/read-discoveries";
 type Tab = "fresh" | "market";
 
 export function TokensClient() {
+  const t = useT();
   const [disc, setDisc] = useState<Payload | null>(null);
   const [failed, setFailed] = useState(false);
   const [tab, setTab] = useState<Tab>("fresh");
@@ -60,13 +62,13 @@ export function TokensClient() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  const gap = disc ? chainGap(disc) : "";
+  const gap = disc ? chainGap(disc, t) : "";
 
   return (
     <>
       <PageHeader
-        title="Tokens"
-        sub="Read live from the chain and the index — never from an agent's own ledger."
+        title={t("common.tokensTitle")}
+        sub={t("common.tokensSub")}
         right={
           <div className="mm-seg" role="tablist">
             <button
@@ -75,7 +77,7 @@ export function TokensClient() {
               className={tab === "fresh" ? "on" : ""}
               onClick={() => setTab("fresh")}
             >
-              Just launched
+              {t("common.tokensFresh")}
             </button>
             <button
               role="tab"
@@ -83,7 +85,7 @@ export function TokensClient() {
               className={tab === "market" ? "on" : ""}
               onClick={() => setTab("market")}
             >
-              Trading now
+              {t("common.tokensMarket")}
             </button>
           </div>
         }
@@ -96,8 +98,8 @@ export function TokensClient() {
 
         {failed && !disc ? (
           <div className="mm-empty">
-            <h2>Couldn&rsquo;t read the market just now</h2>
-            <p>So this is what we don&rsquo;t know, not an empty market. It retries on its own.</p>
+            <h2>{t("common.tokensReadFailTitle")}</h2>
+            <p>{t("common.tokensReadFailBody")}</p>
           </div>
         ) : !disc ? (
           <div className="mm-cards">
@@ -116,27 +118,22 @@ export function TokensClient() {
 }
 
 function FreshList({ disc }: { disc: Payload }) {
+  const t = useT();
   // UNREADABLE FIRST. Saying "nothing launched" when the scan failed is a
   // confident claim about a launchpad running at hundreds of launches an hour.
   if (!disc.chain.launchpad) {
     return (
       <div className="mm-empty">
-        <h2>The launch scan didn&rsquo;t come back</h2>
-        <p>
-          So we can&rsquo;t say what has launched — not that nothing has. The chain turned this read
-          down and it retries on its own.
-        </p>
+        <h2>{t("common.freshUnreadTitle")}</h2>
+        <p>{t("common.freshUnreadBody")}</p>
       </div>
     );
   }
   if (disc.fresh.length === 0) {
     return (
       <div className="mm-empty">
-        <h2>Nothing launched in the last few minutes has anyone trading it</h2>
-        <p>
-          The bar is 25 trades from 3 distinct addresses. Plenty launches; almost none of it is
-          traded by more than the launcher.
-        </p>
+        <h2>{t("common.freshQuietTitle")}</h2>
+        <p>{t("common.freshQuietBody")}</p>
       </div>
     );
   }
@@ -150,22 +147,20 @@ function FreshList({ disc }: { disc: Payload }) {
 }
 
 function MarketList({ disc }: { disc: Payload }) {
+  const t = useT();
   if (disc.indexUnreachable) {
     return (
       <div className="mm-empty">
-        <h2>The index didn&rsquo;t answer</h2>
-        <p>
-          Prices, depth and volume all come from it, so there is nothing to show — which is not the
-          same as nothing trading.
-        </p>
+        <h2>{t("common.mktUnreadTitle")}</h2>
+        <p>{t("common.mktUnreadBody")}</p>
       </div>
     );
   }
   if (disc.rows.length === 0) {
     return (
       <div className="mm-empty">
-        <h2>Nothing cleared the screen</h2>
-        <p>Scanned {disc.scanned} pools. None of them had enough behind it to be worth a card.</p>
+        <h2>{t("common.mktEmptyTitle")}</h2>
+        <p>{t("common.mktEmptyBody", { n: disc.scanned })}</p>
       </div>
     );
   }

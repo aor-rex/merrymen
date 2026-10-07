@@ -2,6 +2,7 @@ import { useCallback, useEffect, useState } from "react";
 import type { Proposal, ProposalsResponse } from "@/app/api/proposals/route";
 import { compactUsd } from "../lib/format";
 import { basketNow, withSymbol } from "./basket";
+import { useT } from "@/lib/i18n";
 
 // basketNow moved to ./basket — Settings.tsx needed the same reasoning and
 // had been doing it wrong.
@@ -61,6 +62,7 @@ type State =
   | { kind: "ok"; body: ProposalsResponse };
 
 export function Proposals({ onResign }: { onResign: () => void }) {
+  const t = useT();
   const [state, setState] = useState<State>({ kind: "loading" });
   /** Which token is mid-write, so one card can be busy without freezing the rest. */
   const [adding, setAdding] = useState<string | null>(null);
@@ -115,7 +117,7 @@ export function Proposals({ onResign }: { onResign: () => void }) {
     setAdding(p.token);
     try {
       const cur = await fetch("/api/settings", { cache: "no-store" });
-      if (!cur.ok) throw new Error("could not read your settings");
+      if (!cur.ok) throw new Error(t("common.proposalsReadFailed"));
       const settings = (await cur.json()) as {
         values?: { customTokens?: unknown[]; basketSymbols?: unknown[] };
         defaults?: { basketSymbols?: unknown[] };
@@ -137,7 +139,7 @@ export function Proposals({ onResign }: { onResign: () => void }) {
       });
       if (!put.ok) {
         const j = (await put.json().catch(() => null)) as { errors?: string[] } | null;
-        throw new Error(j?.errors?.join(" ") ?? `settings refused it (${put.status})`);
+        throw new Error(j?.errors?.join(" ") ?? t("common.proposalsRefused", { status: put.status }));
       }
       setAdded((prev) => new Set(prev).add(p.token));
     } catch (e) {
@@ -171,7 +173,7 @@ export function Proposals({ onResign }: { onResign: () => void }) {
     setAdding("all");
     try {
       const cur = await fetch("/api/settings", { cache: "no-store" });
-      if (!cur.ok) throw new Error("could not read your settings");
+      if (!cur.ok) throw new Error(t("common.proposalsReadFailed"));
       const settings = (await cur.json()) as {
         values?: { customTokens?: unknown[]; basketSymbols?: unknown[] };
         defaults?: { basketSymbols?: unknown[] };
@@ -196,7 +198,7 @@ export function Proposals({ onResign }: { onResign: () => void }) {
       });
       if (!put.ok) {
         const j = (await put.json().catch(() => null)) as { errors?: string[] } | null;
-        throw new Error(j?.errors?.join(" ") ?? `settings refused it (${put.status})`);
+        throw new Error(j?.errors?.join(" ") ?? t("common.proposalsRefused", { status: put.status }));
       }
       // Marked added only after the write the server accepted — an optimistic
       // tick on a refused PUT tells an owner their coin is covered when the one
@@ -257,10 +259,10 @@ export function Proposals({ onResign }: { onResign: () => void }) {
       <section className="proposals folded" aria-label="Coins your agent wants to trade">
         <button type="button" className="proposals-peek" onClick={() => setOpenOverride(true)}>
           <span>
-            {proposals.length} coin{proposals.length === 1 ? "" : "s"} your agent wants to trade
-            {added.size > 0 ? ` · ${added.size} waiting on your signature` : ""}
+            {proposals.length === 1 ? t("common.proposalsFoldedOne", { count: proposals.length }) : t("common.proposalsFoldedMany", { count: proposals.length })}
+            {added.size > 0 ? t("common.proposalsWaiting", { count: added.size }) : ""}
           </span>
-          <span aria-hidden="true">Review</span>
+          <span aria-hidden="true">{t("common.reviewWord")}</span>
         </button>
       </section>
     );
@@ -270,7 +272,7 @@ export function Proposals({ onResign }: { onResign: () => void }) {
     <section className="proposals" aria-label="Coins your agent wants to trade">
       <div className="proposals-head">
         <h3>
-          Your agent found {proposals.length === 1 ? "a coin" : `${proposals.length} coins`} it wants to trade
+          {proposals.length === 1 ? t("common.proposalsFoundOne") : t("common.proposalsFoundMany", { count: proposals.length })}
         </h3>
         <button
           type="button"
@@ -285,12 +287,11 @@ export function Proposals({ onResign }: { onResign: () => void }) {
             }
           }}
         >
-          Fold away
+          {t("common.proposalsFold")}
         </button>
       </div>
       <p className="proposals-note">
-        It can watch these already. It cannot trade them until your signed permission covers
-        them — that is the wall doing its job, and only you can widen it.
+        {t("common.proposalsNote")}
       </p>
       {/* ONE CLICK FOR THE LOT, then the one signature that was always the
           point. Hidden once there is nothing left to add, and while a single
@@ -304,8 +305,8 @@ export function Proposals({ onResign }: { onResign: () => void }) {
           onClick={() => approveAll(proposals.filter((p) => !added.has(p.token)))}
         >
           {adding === "all"
-            ? "adding…"
-            : `Add all ${proposals.filter((p) => !added.has(p.token)).length} to my watchlist`}
+            ? t("common.proposalsAdding")
+            : t("common.proposalsAddAll", { count: proposals.filter((p) => !added.has(p.token)).length })}
         </button>
       )}
 
@@ -319,25 +320,23 @@ export function Proposals({ onResign }: { onResign: () => void }) {
               </span>
               {/* THE CURVE CASE FIRST, and it is not a footnote: covering the
                   token does not give a swap anywhere to route. */}
-              {p.onCurve && <span className="proposal-chip">on its launch curve</span>}
+              {p.onCurve && <span className="proposal-chip">{t("common.proposalCurve")}</span>}
             </div>
             <p className="proposal-why">{p.reason}</p>
             <p className="proposal-figs mono">
               <span>fdv {compactUsd(p.fdvUsd)}</span>
               <span>24h {compactUsd(p.volume24hUsd)}</span>
-              <span>{p.buyers24h === null ? "—" : `${p.buyers24h} buyers`}</span>
+              <span>{p.buyers24h === null ? "—" : t("common.mktBuyers", { n: p.buyers24h })}</span>
             </p>
             {p.onCurve && (
               <p className="proposal-caveat">
-                No pool yet. Approving lets your agent hold it, but a normal swap has nowhere to
-                route until it graduates.
+                {t("common.proposalNoPool")}
               </p>
             )}
 
             {added.has(p.token) ? (
               <p className="proposal-done" role="status">
-                Added to your watchlist and basket. It is <b>not tradable yet</b> — your permission
-                still has to cover it.
+                {t("common.proposalAddedPre")}<b>{t("common.proposalAddedBold")}</b>{t("common.proposalAddedPost")}
               </p>
             ) : (
               <button
@@ -346,7 +345,7 @@ export function Proposals({ onResign }: { onResign: () => void }) {
                 disabled={adding !== null}
                 onClick={() => void approve(p)}
               >
-                {adding === p.token ? "adding…" : p.watched ? `Add ${p.symbol} to the basket` : `Add ${p.symbol}`}
+                {adding === p.token ? t("common.proposalsAdding") : p.watched ? t("common.proposalAddBasket", { symbol: p.symbol }) : t("common.proposalAdd", { symbol: p.symbol })}
               </button>
             )}
           </li>
@@ -363,13 +362,12 @@ export function Proposals({ onResign }: { onResign: () => void }) {
         <div className="proposals-next">
           <p>
             {/* THE SECOND FACT, said before they sign rather than after. */}
-            One more step, and it is the one that matters: re-sign your trading permission so it
-            covers {added.size === 1 ? "this coin" : "these coins"}. Renewal revokes the old permissions on-chain and requires network fees. It seals the replacement around{" "}
-            <b>every token in your settings</b>
-            {covered > 0 ? ` (${covered} today)` : ""}, not only what you just added.
+            {t("common.proposalsNextPre", { coins: added.size === 1 ? t("common.proposalsThisCoin") : t("common.proposalsTheseCoins") })}
+            <b>{t("common.proposalsEveryToken")}</b>
+            {t("common.proposalsNextPost", { tail: covered > 0 ? t("common.proposalsCoveredCount", { covered }) : "" })}
           </p>
           <button type="button" className="proposal-resign" onClick={onResign}>
-            Re-sign my permission →
+            {t("common.resignPermission")}
           </button>
         </div>
       )}

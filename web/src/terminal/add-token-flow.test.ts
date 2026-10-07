@@ -138,7 +138,10 @@ describe("the copy stops promising things it cannot deliver", () => {
     // where the grant will cover it and no strategy will ever propose it.
     const wallet = src("./screens/Wallet.tsx");
     assert.match(wallet, /watchedNotTraded/, "the two cases are told apart");
-    assert.match(wallet, /a signature won&apos;t do it/i, "and the second one says so");
+    // i18n: the sentence lives in the catalogue now; pin the key at the call
+    // site and the wording in EN.
+    assert.match(wallet, /t\("wallet\.watchIntro"\)/, "and the second one says so");
+    assert.match(EN["wallet.watchIntro" as MessageKey] as string, /a signature won.t do it/i);
   });
 
   it("and the class-route hint points where the control actually is", () => {

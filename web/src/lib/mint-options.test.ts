@@ -2,6 +2,9 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { describe, it } from "node:test";
 import { refusalMessage } from "./session";
+import { EN } from "./messages/en";
+
+const EN_TEXT = Object.values(EN).join("\n");
 
 /**
  * The bug this file exists to prevent, written down because it shipped.
@@ -155,6 +158,9 @@ describe("the backup gate gets the copy with the key", () => {
     // The old fallback explained the absence with something untrue. If the key
     // cannot be read, the honest move is to say so and warn against funding.
     assert.ok(!/external wallet — no key stored/.test(GRANT_PAGE_SRC));
-    assert.match(GRANT_PAGE_SRC, /couldn't read your owner key/);
+    // i18n: the sentence lives in the catalogue now; pin the key at the call
+    // site and the wording in EN.
+    assert.match(GRANT_PAGE_SRC, /t\("wallet\.keyUnreadable"\)/);
+    assert.match(EN_TEXT, /couldn't read your owner key/);
   });
 });

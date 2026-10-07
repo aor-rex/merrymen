@@ -5,6 +5,7 @@ import { useWired } from "@/components/WiredProvider";
 import { shortAddress, xProfileUrl } from "@/lib/x-handle";
 import { ownerTag } from "./strategy";
 import { useTrend, type Trend } from "./motion";
+import { useT } from "@/lib/i18n";
 // The one face recipe. This file used to carry its own copy of these, so the
 // terminal's faces and components/AgentAvatar's could drift with nothing to
 // notice — and changing the seed would have meant changing both.
@@ -89,28 +90,29 @@ export function NameBlock({
   verified?: boolean;
 }) {
   const href = verified ? xProfileUrl(owner) : null;
+  const t = useT();
   return (
     <div className="name-block">
       <strong>{title}</strong>
       {owner ? (
         <p className="owned">
           {owner === "you" ? (
-            "owned by you"
+            t("common.ownedByYou")
           ) : href ? (
             <>
-              {"owned by "}
+              {t("common.ownedByPre")}
               <a href={href} target="_blank" rel="noreferrer noopener" className="owner-x">
                 {ownerTag(owner)}
               </a>
               {/* The tick is the whole difference between this and the plain
                   arm; without it a reader cannot tell a checked claim from an
                   unchecked one, which is the thing being fixed. */}
-              <i className="owner-ok" title="This X account was proven by its owner">
+              <i className="owner-ok" title={t("common.ownerProven")}>
                 {" ✓"}
               </i>
             </>
           ) : (
-            `owned by ${shortAddress(owner) ?? ownerTag(owner)}`
+            t("common.ownedByWho", { who: shortAddress(owner) ?? ownerTag(owner) })
           )}
         </p>
       ) : null}
@@ -249,11 +251,12 @@ export function ReadEmpty({
   kind?: EmptyKind;
   compact?: boolean;
 }) {
-  if (state === "unread") return <Empty title="Loading…" kind={kind} compact={compact} />;
+  const t = useT();
+  if (state === "unread") return <Empty title={t("groupchat.loading")} kind={kind} compact={compact} />;
   if (state === "unreadable")
     return (
       <Empty
-        title="Activity unavailable."
+        title={t("common.activityUnavailable")}
         kind={kind} compact={compact}
       />
     );
@@ -419,6 +422,7 @@ export function TabIcon({ id }: { id: import("./live").Tab }) {
 }
 
 export function TopBar({ onSearch, onDeposit }: { onSearch: () => void; onDeposit: () => void }) {
+  const t = useT();
   return (
     <div className="top-row">
       <a href="/" aria-label="Merrymen feed"><LogoMark size={26} /></a>
@@ -427,7 +431,7 @@ export function TopBar({ onSearch, onDeposit }: { onSearch: () => void; onDeposi
           <SearchIcon />
         </button>
         <button type="button" className="fund solid" onClick={onDeposit}>
-          Deposit
+          {t("home.deposit")}
         </button>
       </div>
     </div>

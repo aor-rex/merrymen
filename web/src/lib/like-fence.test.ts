@@ -27,6 +27,9 @@ import assert from "node:assert/strict";
 import { readdirSync, readFileSync, statSync } from "node:fs";
 import { join } from "node:path";
 import { describe, it } from "node:test";
+import { EN } from "./messages/en";
+
+const EN_TEXT = Object.values(EN).join("\n");
 
 const ROOT = join(import.meta.dirname, "..", "..", "..");
 const WORKER = join(ROOT, "worker", "src");
@@ -158,7 +161,11 @@ describe("counts never ride on the cacheable public read", () => {
     assert.match(likes, /if \(j\.read === false\) \{/);
     assert.match(likes, /mineRead: boolean;/);
     const wire = codeOf(readFileSync(join(ROOT, "web", "src", "terminal", "wire.tsx"), "utf8"));
-    assert.match(wire, /!likes\.mineRead\s*\n?\s*\? "Likes could not be loaded just now"/);
+    assert.match(wire, /!likes\.mineRead/);
+    // i18n: the sentence lives in the catalogue now; pin the key at the call
+    // site and the wording in EN.
+    assert.match(wire, /t\("common\.likeFailed"\)/);
+    assert.match(EN_TEXT, /Likes could not be loaded just now/);
   });
 
   it("but the per-caller route is never cached", () => {

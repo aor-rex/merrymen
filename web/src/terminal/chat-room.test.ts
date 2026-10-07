@@ -27,6 +27,9 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import { readFileSync } from "node:fs";
+import { EN } from "../lib/messages/en";
+
+const EN_TEXT = Object.values(EN).join("\n");
 
 const read = (p: string) => readFileSync(new URL(p, import.meta.url), "utf8");
 
@@ -87,7 +90,10 @@ describe("the proposals panel folds instead of shouting", () => {
     // summary line survives — and it carries the count that matters.
     const src = read("./Proposals.tsx");
     assert.match(src, /proposals-peek/);
-    assert.match(src, /waiting on your signature/);
+    // i18n: the sentence lives in the catalogue now; pin the key at the call
+    // site and the wording in EN.
+    assert.match(src, /t\("common\.proposalsWaiting"/);
+    assert.match(EN_TEXT, /waiting on your signature/);
     assert.ok(!/aria-label="Dismiss"|setDismissed\(true\)/.test(src), "there is no way to destroy it");
   });
 

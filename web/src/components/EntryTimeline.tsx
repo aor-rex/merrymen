@@ -1,5 +1,8 @@
+"use client";
+
 import { AgentAvatar } from "@/components/AgentAvatar";
 import { fullDateTime } from "@/lib/format";
+import { useT } from "@/lib/i18n";
 
 /**
  * WHO GOT IN, AND WHEN.
@@ -48,6 +51,7 @@ export function EntryTimeline({
    */
   fillsRead?: boolean;
 }) {
+  const t = useT();
   // CHECKED FIRST, and that order is the whole point. The sentence below is a
   // positive claim about ledger RETENTION, and it used to be printed whenever
   // the list was empty — including when the query had thrown on a ledger
@@ -55,7 +59,7 @@ export function EntryTimeline({
   if (!fillsRead) {
     return (
       <p className="mm-note">
-        The ledger did not answer for this token&rsquo;s fills, so there are no entry times below.
+        {t("common.entriesUnreadBody")}
       </p>
     );
   }
@@ -63,8 +67,7 @@ export function EntryTimeline({
   if (entries.length === 0) {
     return (
       <p className="mm-note">
-        No entry times on record for the agents holding this. That is missing data, not an empty
-        book — the position is real, the trade that opened it is older than what the ledger keeps.
+        {t("common.entriesEmptyBody")}
       </p>
     );
   }
@@ -91,7 +94,7 @@ export function EntryTimeline({
               className={`pin${e.paper ? " unsettled" : ""}`}
               style={{ left: `${x}%`, zIndex: sorted.length - i }}
               title={`${e.name} — ${fullDateTime(e.at * 1000)}${
-                e.paper ? " (paper)" : ""
+                e.paper ? ` (${t("common.paper")})` : ""
               }`}
             >
               <AgentAvatar name={e.name} slug={e.slug ?? null} size={26} />
@@ -100,17 +103,17 @@ export function EntryTimeline({
         })}
       </div>
       <div className="axis mono">
-        <span>{single ? "all at once" : rel(min)}</span>
-        <span className="mid">entry time — not price</span>
-        <span>{single ? "" : rel(max)}</span>
+        <span>{single ? t("common.entriesAllAtOnce") : rel(min, t)}</span>
+        <span className="mid">{t("common.entriesAxis")}</span>
+        <span>{single ? "" : rel(max, t)}</span>
       </div>
     </div>
   );
 }
 
-function rel(at: number): string {
+function rel(at: number, t: ReturnType<typeof useT>): string {
   const s = Math.max(0, Math.floor(Date.now() / 1000) - at);
-  if (s < 3600) return `${Math.round(s / 60)}m ago`;
-  if (s < 86_400) return `${Math.round(s / 3600)}h ago`;
-  return `${Math.round(s / 86_400)}d ago`;
+  if (s < 3600) return t("common.relM", { n: Math.round(s / 60) });
+  if (s < 86_400) return t("common.relH", { n: Math.round(s / 3600) });
+  return t("common.relD", { n: Math.round(s / 86_400) });
 }

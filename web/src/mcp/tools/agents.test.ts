@@ -37,7 +37,7 @@ const QUOTED: Record<string, string> = {
   "discard & start over": "web/src/terminal/screens/Wallet.tsx",
   "allow control commands": "web/src/lib/messages/en.ts",
   "live trading": "web/src/lib/messages/en.ts",
-  "Edit signed limits": "web/src/terminal/HostedControls.tsx",
+  "Edit signed limits": "web/src/lib/messages/en.ts",
 };
 
 test("get_agent_controls returns the controls list, and the kill switch is where the web app and Telegram put it", async () => {
@@ -105,6 +105,12 @@ test("every label a control's `where` quotes is on screen in the web app", () =>
       assert.ok(shows(source(file), label), `${c.control}: '${label}' is in ${file}`);
     }
   }
+  // i18n: "Edit signed limits" lives in the catalogue now; the control must
+  // still reference its key.
+  assert.ok(
+    source("web/src/terminal/HostedControls.tsx").includes('t("common.editSignedLimits")'),
+    "the limits panel must reference the catalogue key",
+  );
 });
 
 test("the screens on each path exist and lead where the text says", () => {
@@ -116,7 +122,10 @@ test("the screens on each path exist and lead where the text says", () => {
   const hosted = source("web/src/terminal/HostedControls.tsx");
 
   // You → Wallet & permissions opens /grant, whose red discard button deletes the stored grant.
-  assert.ok(shows(you, "<strong>Wallet & permissions</strong>"));
+  // i18n: the labels live in the catalogue now; pin the keys at the call site
+  // and the wording in EN.
+  assert.ok(you.includes('t("you.walletPermissions")'));
+  assert.ok(en.includes('"you.walletPermissions": "Wallet & permissions"'));
   assert.ok(app.includes(`onStop={() => {window.location.href="/grant";}}`));
   assert.ok(shows(wallet, `<button className="btn-kill" style={{ padding: "10px 16px" }} onClick={() => void discard()} disabled={discarding || renewing || securityBusy}>`));
   // Through /api/grants/discard, which removes it as DELETE /api/grants does and
@@ -127,13 +136,15 @@ test("the screens on each path exist and lead where the text says", () => {
   assert.ok(startOver.includes("remove: () => getGrantStore().remove(tenant)") && startOver.includes("remove: removeSelfHostedGrant"), "on both deployments");
 
   // You → Trading limits → Edit signed limits goes to /grant; You → Settings is /settings.
-  assert.ok(you.includes("<strong>Trading limits</strong>"));
-  assert.ok(hosted.includes(`<a className="flow-primary" href="/grant">Edit signed limits</a>`));
-  assert.ok(you.includes(`href="/settings"`) && you.includes("<strong>Settings</strong>"));
+  assert.ok(you.includes('t("you.tradingLimits")') && en.includes('"you.tradingLimits": "Trading limits"'));
+  assert.ok(hosted.includes('<a className="flow-primary" href="/grant">{t("common.editSignedLimits")}</a>'));
+  assert.ok(you.includes(`href="/settings"`) && you.includes('t("you.settings")') && en.includes('"you.settings": "Settings"'));
   assert.ok(settings.includes(`t("settings.label.liveTrading")`) && en.includes(`"settings.label.liveTrading": "live trading"`));
 
   // Settings → Advanced settings → Telegram controls → allow control commands.
-  assert.ok(settings.includes("<summary>Advanced settings</summary>"));
+  // i18n: the label lives in the catalogue now; pin the key at the call site
+  // and the wording in EN.
+  assert.ok(settings.includes('t("settings.text.advancedSettings")') && en.includes('"settings.text.advancedSettings": "Advanced settings"'));
   assert.ok(settings.includes(`t("settings.section.telegramControls")`) && en.includes(`"settings.section.telegramControls": "Telegram controls"`));
   assert.ok(settings.includes(`t("settings.label.allowControlCommands")`));
   for (const c of AGENT_CONTROLS.filter((x) => x.where.includes("Telegram /"))) {

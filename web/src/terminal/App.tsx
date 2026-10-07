@@ -2,6 +2,7 @@
 import { usePathname, useRouter } from "next/navigation";
 import { AccountEntry, FundingPanel, LimitsPanel, requestJson, type AccountState } from "./HostedControls";
 import { SignOut } from "./SignOut";
+import { useT } from "@/lib/i18n";
 import {
   loadTokenQuotes,
   loadSessionChanges,
@@ -85,6 +86,7 @@ function subscribeDesktop(onChange: () => void) {
 }
 
 export function App() {
+  const t = useT();
   const bodyRef = useRef<HTMLDivElement>(null);
   /**
    * THE LATEST ANSWER OF EVERY READ, and the screens drawn from them.
@@ -368,7 +370,7 @@ export function App() {
       if(!alive)return;
       setProfileError("");
       setProfileTheses(p.theses ?? []);
-      setProfileActivityError(p.thesesRead === false ? "Recent decisions could not be loaded." : "");
+      setProfileActivityError(p.thesesRead === false ? t("common.decisionsFailed") : "");
       // HOW IT DECIDES, FROM ITS OWN DECISIONS. This was hard-coded thesis ""
       // and glance "custom", so every profile read "Its own rules" — a claim
       // about a Trencher or a steady basket that it wrote its own. read-agent
@@ -461,7 +463,7 @@ export function App() {
   // there is no agent to be blocked and no book to simulate. `autonomyOf` with
   // a null mode returns exactly that, so the shell carries a real answer rather
   // than a placeholder every surface then has to special-case.
-  const emptyMine = {name:"Your agent",slug:null,handle:null,owner:null,equity:null,chg24:null,mode:null,thesis:null,moves:[],glance:{id:"custom" as const,label:"",cashUsd:undefined},autonomy:autonomyOf({mode:null,liveBlocker:null})};
+  const emptyMine = {name:t("you.yourAgent"),slug:null,handle:null,owner:null,equity:null,chg24:null,mode:null,thesis:null,moves:[],glance:{id:"custom" as const,label:"",cashUsd:undefined},autonomy:autonomyOf({mode:null,liveBlocker:null})};
   const displayMine = mine ?? emptyMine;
   // The grants read can finish before the first feed read. In that window the
   // feed has no tenant yet because it has no answer; keep its loading state.
@@ -526,7 +528,7 @@ export function App() {
             setChatDocked(next.tab === "agent");
             openScreen(next);
           } else openScreen(next);
-        }} onExplore={section => { if (desktop) setSidebarSection(section); }} onQuestion={()=>{setChatDraft(current => current || "Explain my strategy and trading limits. Am I using paper or live trading?");goTab("agent");}}/>
+        }} onExplore={section => { if (desktop) setSidebarSection(section); }} onQuestion={()=>{setChatDraft(current => current || t("common.suggestQuestion"));goTab("agent");}}/>
         {!mine && !desktop && screen.kind !== "create" && screen.kind !== "groupchat" && <AccountEntry account={account} accountFailed={accountFailed} portfolio={portfolioRead} retrying={accountBusy} onRefresh={refreshAccount} onSignedIn={invalidateOwnerView}/>}
         {screen.kind === "create" && <CreateAgent account={account} accountFailed={accountFailed} retrying={accountBusy} onRefresh={refreshAccount} onSignedIn={invalidateOwnerView} onBack={()=>goTab("home")} onDone={()=>{refreshAccount();goTab("agent");}} onFund={grant=>{setAccount(current=>current?{...current,status:{...current.status,exists:true,grant}}:current);openScreen({kind:"deposit"});}}/>}
         {screen.kind === "settings" && <Settings onFund={()=>openScreen({kind:"deposit"})} slug={mine?.slug ?? null} onSaved={chat.refreshSettings}/>}
@@ -616,11 +618,11 @@ export function App() {
             beside the sign-out rather than only in an API response. */}
         {screen.kind === "tab" && screen.tab === "you" && (
           <div className="profile-session-actions">
-            {!account?.status.exists && <a href="/create">Create agent</a>}
+            {!account?.status.exists && <a href="/create">{t("common.createAgent")}</a>}
             {account?.session.hosted && account.session.address && (
               <>
                 <span className="profile-session-who" title={account.session.address}>
-                  signed in as <code>{account.session.address}</code>
+                  {t("wallet.signedInAs")} <code>{account.session.address}</code>
                 </span>
                 <SignOut
                   after={() => {
@@ -650,22 +652,22 @@ export function App() {
           // says (tokenMissingOf).
           const missing = clockShell.tokenMissing(live.reads);
           if (missing.loading) {
-            return <section className="hosted-entry"><p role="status">Loading token…</p></section>;
+            return <section className="hosted-entry"><p role="status">{t("common.tokenLoading")}</p></section>;
           }
           const unreadable = missing.unreadable;
           return (
             <section className="hosted-entry">
-              <h1>{unreadable ? "Token unavailable" : "Token not listed"}</h1>
+              <h1>{unreadable ? t("common.tokenUnavailable") : t("common.tokenNotListed")}</h1>
               <p role="status">
                 {unreadable
-                  ? "Could not load this token. Try again."
-                  : "Token not found. Check the address."}
+                  ? t("common.tokenLoadFailed")
+                  : t("common.tokenNotFound")}
               </p>
               {/* The two reads that list tokens — not the account, which is
                   what this button used to refresh while the page said the
                   token could not be loaded. */}
-              {unreadable && <button onClick={missing.retry}>Try again</button>}
-              <button onClick={()=>goTab("home")}>Back to markets</button>
+              {unreadable && <button onClick={missing.retry}>{t("common.tryAgain")}</button>}
+              <button onClick={()=>goTab("home")}>{t("common.backToMarkets")}</button>
             </section>
           );
         })()}
@@ -680,7 +682,7 @@ export function App() {
           />
         )}
         {screen.kind === "profile" && !agent && (profileError
-          ? <section className="hosted-entry"><p role="status">{profileError}</p><button onClick={()=>goTab("agent")}>Back to agents</button></section>
+          ? <section className="hosted-entry"><p role="status">{profileError}</p><button onClick={()=>goTab("agent")}>{t("common.backToAgents")}</button></section>
           : <section className="hosted-entry"><SkeletonRows rows={4} label="Loading agent"/></section>)}
         {/* THE FAILURE IS SAID EVEN WHEN THERE IS SOMETHING TO SHOW.
             `agent` falls back to `listedAgent` once the profile read fails, so a
@@ -694,8 +696,8 @@ export function App() {
         {screen.kind === "profile" && agent && profileError && (
           <p role="status" className="hosted-note">
             {profile
-              ? "Couldn’t refresh this profile — showing what we last read."
-              : "Some profile details are unavailable. Showing the agent’s leaderboard summary."}
+              ? t("common.profileStale")
+              : t("common.profilePartial")}
           </p>
         )}
         {screen.kind === "profile" && agent && (
@@ -754,7 +756,7 @@ export function App() {
           onScreen={openScreen}
           onTab={goTab}
         />
-      ) : desktop ? <aside className="desktop-portfolio">{screen.kind === "create" ? <section className="hosted-entry"><h2>Make it yours.</h2><p>Pick a strategy, set its limits, and save your wallet’s recovery key.</p><p>You can start in paper mode and follow your agent before adding real funds.</p></section> : <AccountEntry account={account} accountFailed={accountFailed} portfolio={portfolioRead} retrying={accountBusy} onRefresh={refreshAccount} onSignedIn={invalidateOwnerView}/>}</aside> : null}
+      ) : desktop ? <aside className="desktop-portfolio">{screen.kind === "create" ? <section className="hosted-entry"><h2>{t("common.makeItYours")}</h2><p>{t("common.makeItYoursBody")}</p><p>{t("common.makeItYoursPaper")}</p></section> : <AccountEntry account={account} accountFailed={accountFailed} portfolio={portfolioRead} retrying={accountBusy} onRefresh={refreshAccount} onSignedIn={invalidateOwnerView}/>}</aside> : null}
       {(
           <nav className="tabbar" aria-label="Main navigation">
             {TABS.map((t) => (
@@ -789,7 +791,7 @@ export function App() {
       {desktop && !chatDocked && mine && chat.unread && (
         <button type="button" className="chat-unread-pill" onClick={() => setChatDocked(true)}>
           <i className="tab-unread" aria-hidden="true" />
-          New from {mine.name}
+          {t("common.chatUnread", { name: mine.name })}
         </button>
       )}
       {desktop && chatDocked && mine && (

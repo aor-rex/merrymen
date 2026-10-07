@@ -21,11 +21,12 @@ import { isAddr, normalizeAddr } from "@/lib/address";
 import { chainFor, readAddress, readAsOwner, verdictOf, type Lookup, type Reading } from "@/lib/account-lookup";
 import { robinhoodChain, robinhoodTestnet } from "@merrymen/core";
 import "@/styles/lookup.css";
+import { useT } from "@/lib/i18n";
 
 const MAINNET = robinhoodChain.id;
 const TESTNET = robinhoodTestnet.id;
 
-const fmtEth = (wei: bigint | null) => (wei === null ? "unreadable" : `${formatUnits(wei, 18)} ETH`);
+const fmtEth = (wei: bigint | null, unreadable: string) => (wei === null ? unreadable : `${formatUnits(wei, 18)} ETH`);
 
 function ReadingCard({
   title,
@@ -38,6 +39,7 @@ function ReadingCard({
   reading: Reading;
   extra?: { label: string; rows: { symbol: string; amount: string }[] };
 }) {
+  const t = useT();
   const nothing = reading.holdings.length === 0 && (reading.nativeWei === null || reading.nativeWei === 0n);
   return (
     <div className="mm-lookup-card">
@@ -47,14 +49,14 @@ function ReadingCard({
         {note}
         {" · "}
         {reading.deployed === null
-          ? "deployment unknown"
+          ? t("common.deployUnknown")
           : reading.deployed
-            ? "contract deployed"
-            : "not deployed"}
+            ? t("common.deployYes")
+            : t("common.deployNo")}
       </p>
 
       {nothing && !extra?.rows.length ? (
-        <p className="mm-lookup-none">Nothing held here.</p>
+        <p className="mm-lookup-none">{t("common.lookupNothing")}</p>
       ) : (
         <div className="mm-lookup-rows">
           {reading.holdings.map((h) => (
@@ -66,7 +68,7 @@ function ReadingCard({
           {reading.nativeWei !== null && reading.nativeWei > 0n && (
             <div className="mm-lookup-row">
               <span>ETH (gas)</span>
-              <span>{fmtEth(reading.nativeWei)}</span>
+              <span>{fmtEth(reading.nativeWei, t("common.unreadableWord"))}</span>
             </div>
           )}
           {extra?.rows.map((r) => (
@@ -82,8 +84,7 @@ function ReadingCard({
 
       {reading.unreadable.length > 0 && (
         <p className="mm-lookup-warn">
-          Could not read: {reading.unreadable.join(", ")}. That is not the same as empty — the chain did
-          not answer, so this list is incomplete. Try again before concluding anything.
+          {t("common.lookupUnreadable", { list: reading.unreadable.join(", ") })}
         </p>
       )}
     </div>
@@ -99,19 +100,19 @@ function ReadingCard({
  * exists.
  */
 function Verdict({ l }: { l: Lookup }) {
+  const t = useT();
   const v = verdictOf(l);
   const derived = l.asOwner?.derived;
 
   if (v.kind === "both" || v.kind === "owner") {
     return (
       <div className="mm-lookup-verdict">
-        <h2>This looks like an owner address.</h2>
+        <h2>{t("common.lookupOwnerTitle")}</h2>
         <p>
-          It controls the account <code>{derived}</code>, and that account holds what is listed below.
+          {t("common.lookupOwnerPre")}<code>{derived}</code>{t("common.lookupOwnerPost")}
         </p>
         <p>
-          To move it you need the private key for <code>{l.input}</code> — the recovery key you saved
-          when the agent was created. Run <code>npx merrymen recover</code> and paste it there.
+          {t("common.lookupOwnerKeyPre")}<code>{l.input}</code>{t("common.lookupOwnerKeyMid")}<code>npx merrymen recover</code>{t("common.lookupOwnerKeyPost")}
         </p>
       </div>
     );
@@ -120,11 +121,10 @@ function Verdict({ l }: { l: Lookup }) {
   if (v.kind === "account") {
     return (
       <div className="mm-lookup-verdict">
-        <h2>This looks like an agent account.</h2>
-        <p>The smart account itself, holding what is listed below.</p>
+        <h2>{t("common.lookupAccountTitle")}</h2>
+        <p>{t("common.lookupAccountSub")}</p>
         <p>
-          A smart account cannot sign for itself — moving these funds needs its OWNER key, which is a
-          different address. That is the recovery key you were shown once when the agent was created.
+          {t("common.lookupAccountBody")}
         </p>
       </div>
     );
@@ -133,10 +133,9 @@ function Verdict({ l }: { l: Lookup }) {
   if (v.kind === "unreadable") {
     return (
       <div className="mm-lookup-verdict is-quiet">
-        <h2>The chain did not answer.</h2>
+        <h2>{t("common.lookupChainTitle")}</h2>
         <p>
-          Some balances could not be read, so nothing here should be taken as “empty”. Try again in a
-          moment, or switch chain if the agent is on the other one.
+          {t("common.lookupChainBody")}
         </p>
       </div>
     );
@@ -145,10 +144,9 @@ function Verdict({ l }: { l: Lookup }) {
   if (v.kind === "empty-deployed") {
     return (
       <div className="mm-lookup-verdict is-quiet">
-        <h2>This account exists, and is empty.</h2>
+        <h2>{t("common.lookupEmptyTitle")}</h2>
         <p>
-          There is a contract deployed here, so it has been used — the balances are genuinely zero
-          rather than never created. Funds have already moved out, or the agent is on the other chain.
+          {t("common.lookupEmptyBody")}
         </p>
       </div>
     );
@@ -158,23 +156,19 @@ function Verdict({ l }: { l: Lookup }) {
   // for a support backdoor that does not exist.
   return (
     <div className="mm-lookup-verdict is-quiet">
-      <h2>Nothing was ever created from this address.</h2>
+      <h2>{t("common.lookupNeverTitle")}</h2>
       <p>
-        Read as an owner it derives <code>{derived}</code>, which has no contract and no balance; read
-        as an account it holds nothing either.
+        {t("common.lookupNeverPre")}<code>{derived}</code>{t("common.lookupNeverMid")}
       </p>
       <p>
-        This is usually a <strong>sign-in wallet</strong> — the wallet you logged in with identifies
-        you, but it was never your agent&rsquo;s owner. A legacy agent&rsquo;s owner key was generated
-        in your browser and shown once as the <strong>recovery key</strong>. Look for that, or open the
-        wallet screen in the same browser profile you created the agent in, where it can still be
-        revealed.
+        {t("common.lookupNeverPre2")}<strong>{t("common.lookupNeverBold1")}</strong>{t("common.lookupNeverMid2")}<strong>{t("common.lookupNeverBold2")}</strong>{t("common.lookupNeverPost")}
       </p>
     </div>
   );
 }
 
 export function LookupClient() {
+  const t = useT();
   const [value, setValue] = useState("");
   // Widened deliberately: `useState(MAINNET)` infers the literal 4663, and the
   // testnet radio then fails to typecheck against its own state setter.
@@ -199,7 +193,7 @@ export function LookupClient() {
   async function run() {
     const addr = normalizeAddr(value);
     if (!isAddr(addr)) {
-      setError("That is not an address. Paste a 0x address, 42 characters.");
+      setError(t("common.lookupBadAddr"));
       return;
     }
     const address = addr as `0x${string}`;
@@ -249,11 +243,9 @@ export function LookupClient() {
     <div className="mm mm-lookup">
       <div className="mm-lookup-inner">
         <p className="mm-lookup-brand">merrymen</p>
-        <h1>What is in this account?</h1>
+        <h1>{t("common.lookupTitle")}</h1>
         <p className="mm-lookup-lede">
-          Paste any address — your agent&rsquo;s account, or the owner it was created from — and this
-          reads the chain and tells you which one it is and what it holds. No sign-in, no key, and
-          nothing here can move funds.
+          {t("common.lookupLede")}
         </p>
 
         <div className="mm-lookup-form">
@@ -270,7 +262,7 @@ export function LookupClient() {
             aria-label="Address to look up"
           />
           <button className="mm-lookup-btn" onClick={() => void run()} disabled={busy}>
-            {busy ? "reading the chain…" : "look it up"}
+            {busy ? t("common.lookupReading") : t("common.lookupLookUp")}
           </button>
         </div>
 
@@ -292,18 +284,18 @@ export function LookupClient() {
             {settled ? (
               <Verdict l={result} />
             ) : (
-              <p className="mm-lookup-meta">reading the chain — the owner derivation scans for a class vault and can take about half a minute.</p>
+              <p className="mm-lookup-meta">{t("common.lookupPending")}</p>
             )}
 
             {result.asOwner && (
               <ReadingCard
-                title="Read as an owner → the account it derives"
-                note="the ERC-4337 account this address controls"
+                title={t("common.lookupReadOwner")}
+                note={t("common.lookupNoteOwner")}
                 reading={result.asOwner.reading}
                 {...(result.asOwner.classHoldings.length > 0
                   ? {
                       extra: {
-                        label: "in class vault",
+                        label: t("common.lookupVaultLabel"),
                         rows: result.asOwner.classHoldings.map((h) => ({ symbol: h.symbol, amount: h.amount })),
                       },
                     }
@@ -311,47 +303,40 @@ export function LookupClient() {
               />
             )}
             {result.ownerError && (
-              <p className="mm-lookup-warn">Could not derive an account from this address: {result.ownerError}</p>
+              <p className="mm-lookup-warn">{t("common.lookupOwnerErr", { error: result.ownerError ?? "" })}</p>
             )}
 
             {result.asAccount && (
               <ReadingCard
-                title="Read as an account → the address itself"
-                note="balances held directly at this address"
+                title={t("common.lookupReadAccount")}
+                note={t("common.lookupNoteAccount")}
                 reading={result.asAccount}
               />
             )}
             {result.accountError && (
-              <p className="mm-lookup-warn">Could not read this address directly: {result.accountError}</p>
+              <p className="mm-lookup-warn">{t("common.lookupAccountErr", { error: result.accountError ?? "" })}</p>
             )}
           </>
         )}
 
         <div className="mm-lookup-help">
-          <h2>Three addresses people mix up</h2>
+          <h2>{t("common.lookupHelpTitle")}</h2>
           <dl>
-            <dt>The wallet you sign in with</dt>
+            <dt>{t("common.lookupHelpSignin")}</dt>
             <dd>
-              Identity only. It says which agent is yours; it has never controlled the funds, and
-              reconnecting it does not give you custody.
+              {t("common.lookupHelpSigninBody")}
             </dd>
-            <dt>The owner key</dt>
+            <dt>{t("common.lookupHelpOwner")}</dt>
             <dd>
-              What actually controls the account. For a legacy agent this was generated in your browser
-              and shown once as the <strong>recovery key</strong> — it is not your sign-in wallet.
+              {t("common.lookupHelpOwnerPre")}<strong>{t("common.lookupHelpOwnerBold")}</strong>{t("common.lookupHelpOwnerPost")}
             </dd>
-            <dt>The agent account</dt>
+            <dt>{t("common.lookupHelpAccount")}</dt>
             <dd>
-              The smart account that holds the money. It is an ERC-4337 contract, not a normal wallet,
-              so importing the owner key into MetaMask shows an <em>empty</em> wallet — the key derives
-              a different address from the account.
+              {t("common.lookupHelpAccountPre")}<em>{t("common.lookupHelpAccountEm")}</em>{t("common.lookupHelpAccountPost")}
             </dd>
           </dl>
           <p>
-            With the recovery key, <code>npx merrymen recover</code> sweeps the account to any wallet
-            you name. It runs on your machine and the key never leaves it. The key is never sent to our
-            servers, so if it is lost and the browser profile that created it is gone, nobody can
-            recover the account — including us.
+            {t("common.lookupRecoverPre")}<code>npx merrymen recover</code>{t("common.lookupRecoverPost")}
           </p>
         </div>
       </div>

@@ -11,6 +11,7 @@ import type { LocalAccount } from "viem";
 import type { PrivyOwner } from "./usePrivyOwner";
 import { needsPermissionReplacement } from "@/lib/permission-replacement";
 import { loadRecoveryGrants } from "@/lib/saved-grant-binding";
+import { EN, type MessageKey } from "@/lib/messages/en";
 let deferred: typeof import("./test-dom").deferred;
 let json: typeof import("./test-dom").json;
 let testDom: typeof import("./test-dom").testDom;
@@ -190,7 +191,7 @@ function assertExistingPermissionKept(before: ReturnType<typeof storageSnapshot>
   assert.equal(needsPermissionReplacement(activeGrant), false, "the existing permission must remain re-armable");
   assert.deepEqual(storageSnapshot(), before, "recovery storage and replacement markers must remain unchanged");
   assert.doesNotMatch(ui.container.textContent!, /Earlier permissions were revoked/);
-  assert.doesNotMatch(ui.container.textContent!, /this wallet isn't active/);
+  assert.doesNotMatch(ui.container.textContent!, /this wallet isn.t active/);
 }
 
 describe("the funded wallet's re-sign control", () => {
@@ -398,7 +399,7 @@ describe("the funded wallet's re-sign control", () => {
     };
     await ui.render(React.createElement(Wallet));
     assert.match(ui.container.textContent!, /Couldn.t check your agent/);
-    assert.doesNotMatch(ui.container.textContent!, /this wallet isn't active|re-sign this key/);
+    assert.doesNotMatch(ui.container.textContent!, /this wallet isn.t active|re-sign this key/);
     assert.match(ui.container.textContent!, /Wallets saved in this browser/);
     await ui.click("show recovery key");
     assert.ok(ui.container.textContent!.includes(grant.demoOwnerPrivateKey!), "local recovery remains available during a server outage");
@@ -419,7 +420,7 @@ describe("the funded wallet's re-sign control", () => {
     };
     await ui.render(React.createElement(Wallet));
     assert.match(ui.container.textContent!, /Couldn.t check your agent/);
-    assert.doesNotMatch(ui.container.textContent!, /re-sign this key|this wallet isn't active/);
+    assert.doesNotMatch(ui.container.textContent!, /re-sign this key|this wallet isn.t active/);
   });
 
   it("does not let an older account response restore signing controls after tab revalidation", async () => {
@@ -434,9 +435,13 @@ describe("the funded wallet's re-sign control", () => {
     };
     await ui.render(React.createElement(Wallet));
     await act(async () => { document.dispatchEvent(new Event("visibilitychange")); });
-    assert.match(ui.container.textContent!, /this wallet isn't active/);
+    assert.match(ui.container.textContent!, /this wallet isn.t active/);
+    assert.ok(
+      ui.container.textContent!.includes(EN["wallet.desyncTitle" as MessageKey] as string),
+      "the desync title renders from the catalogue",
+    );
     await act(async () => { oldGrant.resolve(json({ exists: true, grant })); });
-    assert.match(ui.container.textContent!, /this wallet isn't active/);
+    assert.match(ui.container.textContent!, /this wallet isn.t active/);
   });
 
   for (const kind of ["legacy", "Privy"] as const) it(`${kind} renewal refuses a real oversized class + Trencher + v4 wall before replacing the active grant`, async () => {
@@ -934,7 +939,11 @@ describe("the funded wallet's re-sign control", () => {
     assert.equal(mintCalls, 0);
     await ui.remount(React.createElement(Wallet));
     assert.ok(ui.container.querySelector("#resign"), "the authenticated owner's renewal survives the missing server grant");
-    assert.match(ui.container.textContent!, /this wallet isn't active/);
+    assert.match(ui.container.textContent!, /this wallet isn.t active/);
+    assert.ok(
+      ui.container.textContent!.includes(EN["wallet.desyncTitle" as MessageKey] as string),
+      "the desync title renders from the catalogue",
+    );
     revoke = async () => ({ transactionHash: `0x${"4".repeat(64)}` });
     renew = async () => ({ local: { ...activeGrant, sessionKeyAddress: `0x${"8".repeat(40)}` }, handoff: { ok: true } });
     await acknowledge("I authorize revoking");

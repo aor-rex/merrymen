@@ -1,5 +1,8 @@
+"use client";
+
 import type { AgentProfile } from "@/lib/read-agent";
 import { dayLabel } from "@/lib/format";
+import { useT } from "@/lib/i18n";
 
 /**
  * WHAT THE BOOK DID, WITH THE OWNER'S CASH TAKEN OUT OF IT.
@@ -42,11 +45,11 @@ const pctOf = (g: number) => `${g >= 1 ? "+" : ""}${((g - 1) * 100).toFixed(1)}%
 const day = (sec: number) =>
   dayLabel(sec * 1000);
 
-/** "8 hours" / "3 days" / "12 minutes" — a window a reader can hold. */
-function span(sec: number): string {
-  if (sec < 5400) return `${Math.max(1, Math.round(sec / 60))} minutes`;
-  if (sec < 172_800) return `${Math.round(sec / 3600)} hours`;
-  return `${Math.round(sec / 86_400)} days`;
+/** A window a reader can hold — "8 hours" / "3 days" / "12 minutes". */
+function span(sec: number, t: ReturnType<typeof useT>): string {
+  if (sec < 5400) return t("common.durMinutes", { n: Math.max(1, Math.round(sec / 60)) });
+  if (sec < 172_800) return t("common.durHours", { n: Math.round(sec / 3600) });
+  return t("common.durDays", { n: Math.round(sec / 86_400) });
 }
 
 /**
@@ -76,6 +79,7 @@ function breakSec(points: readonly { at: number }[]): number {
 }
 
 export function EquityLine({ agent }: { agent: AgentProfile }) {
+  const t = useT();
   const paper = agent.mode === "paper";
 
   // THREE STATES, CHECKED IN THIS ORDER. Only the first is an error, and an
@@ -83,7 +87,7 @@ export function EquityLine({ agent }: { agent: AgentProfile }) {
   if (!agent.equityRead) {
     return (
       <div className="mm-readfail">
-        The ledger turned down this read, so there is no line below. It retries on its own.
+        {t("common.equityUnreadBody")}
       </div>
     );
   }
@@ -95,8 +99,7 @@ export function EquityLine({ agent }: { agent: AgentProfile }) {
   if (!paper && !agent.funded) {
     return (
       <p className="mm-note">
-        No deposit or withdrawal is on record for this agent, so a rise in its balance cannot be
-        told apart from money its owner put in.
+        {t("common.equityNoFlows")}
       </p>
     );
   }
@@ -116,16 +119,13 @@ export function EquityLine({ agent }: { agent: AgentProfile }) {
   if (!paper && !agent.contributionsEvidenced) {
     return (
       <p className="mm-note">
-        The deposits and withdrawals on record for this agent are inferred from balance changes
-        rather than read from the chain, so they cannot be divided out of its equity — and a growth
-        figure computed over them would not be its doing. The balance history is above; the return
-        is not published until the capital behind it is evidenced.
+        {t("common.equityUnevidenced")}
       </p>
     );
   }
 
   if (agent.growth.length < 2) {
-    return <p className="mm-note">Not enough of a history to draw yet.</p>;
+    return <p className="mm-note">{t("common.equityShort")}</p>;
   }
 
   const pts = agent.growth;
@@ -188,7 +188,7 @@ export function EquityLine({ agent }: { agent: AgentProfile }) {
         viewBox={`0 0 ${W} ${H}`}
         preserveAspectRatio="none"
         role="img"
-        aria-label={`${agent.name} equity less contributions, ${pctOf(last)} over ${span(t1 - t0)}`}
+        aria-label={`${agent.name} equity less contributions, ${pctOf(last)} over ${span(t1 - t0, t)}`}
       >
         {/* THE ORIGIN. Everything above this line the agent added, everything
             below it the agent lost. It is the only reference the reader needs
@@ -237,28 +237,19 @@ export function EquityLine({ agent }: { agent: AgentProfile }) {
       {/* MANDATORY. Without it a reader takes this for the account balance, and
           takes the axis for wall-clock time, which it deliberately is not. */}
       <figcaption>
-        Equity with the owner&rsquo;s deposits and withdrawals divided out &mdash; the only part
-        that is the agent&rsquo;s doing. {pts.length} readings over {span(t1 - t0)} in{" "}
-        {placed.length} {placed.length === 1 ? "run" : "runs"}
-        {typical > 0 && <>, about {span(typical)} apart</>}; the stretches where the worker wrote
-        nothing are left out rather than drawn across, which is what the breaks are. Gross of gas,
-        unlike the return above.
-        {paper && (
-          <>
-            {" "}
-            This is a simulated book, and the ledger records no mode per reading &mdash; the label
-            is the agent&rsquo;s current one.
-          </>
-        )}
+        {t("common.equityCaption", {
+          n: pts.length,
+          span: span(t1 - t0, t),
+          runs: placed.length,
+          runWord: placed.length === 1 ? t("common.runOne") : t("common.runMany"),
+        })}
+        {typical > 0 && <>{t("common.equityTypical", { span: span(typical, t) })}</>}{t("common.equityGaps")}
+        {paper && <>{" "}{t("common.equityPaper")}</>}
         {/* The divisor's own evidence class. An inferred flow is a cash change
             no fill explains — and a new epoch's whole opening balance is one.
             The shape is published; the amounts never are. */}
         {agent.flowsTotal > 0 && agent.flowsWithTx < agent.flowsTotal && (
-          <>
-            {" "}
-            {agent.flowsWithTx} of {agent.flowsTotal} deposits and withdrawals carry a transaction;
-            the rest were inferred from balance changes.
-          </>
+          <>{" "}{t("common.equityFlows", { withTx: agent.flowsWithTx, total: agent.flowsTotal })}</>
         )}
       </figcaption>
     </figure>

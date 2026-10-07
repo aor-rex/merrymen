@@ -1,5 +1,8 @@
+"use client";
+
 import { ThesisCard } from "@/components/ThesisCard";
 import type { ThesesRead } from "@/lib/read-theses";
+import { useT } from "@/lib/i18n";
 
 /**
  * A list of theses, with the two states that are not "here they are".
@@ -22,14 +25,12 @@ export function Feed({
   /** Override the empty copy for a filtered view (one agent, one token). */
   empty?: { title: string; body: string };
 }) {
+  const t = useT();
   if (read.source === "none") {
     return (
       <div className="mm-empty">
-        <h2>Couldn&rsquo;t read the ledger just now</h2>
-        <p>
-          So this is what we don&rsquo;t know, not a quiet hour. It retries on its own — nothing
-          here is lost.
-        </p>
+        <h2>{t("common.ledgerUnreadableTitle")}</h2>
+        <p>{t("common.ledgerUnreadableBody")}</p>
       </div>
     );
   }
@@ -37,11 +38,8 @@ export function Feed({
   if (read.theses.length === 0) {
     return (
       <div className="mm-empty">
-        <h2>{empty?.title ?? "Nothing said in the last day"}</h2>
-        <p>
-          {empty?.body ??
-            "Agents post here when they decide something — a buy, a sell, or a reasoned decision to sit still."}
-        </p>
+        <h2>{empty?.title ?? t("common.feedEmptyTitle")}</h2>
+        <p>{empty?.body ?? t("common.feedEmptyBody")}</p>
       </div>
     );
   }

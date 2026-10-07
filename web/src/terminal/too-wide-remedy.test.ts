@@ -18,6 +18,9 @@ import { readFileSync } from "node:fs";
 import { describe, it } from "node:test";
 import { isWallTooWide, WALL_TOO_WIDE, wallShape, wallSignable } from "@merrymen/core";
 import { buildCallPermissions } from "../../../packages/core/src/wall";
+import { EN } from "../lib/messages/en";
+
+const EN_TEXT = Object.values(EN).join("\n");
 
 const read = (p: string) => readFileSync(new URL(p, import.meta.url), "utf8");
 
@@ -56,19 +59,22 @@ describe("the too-wide refusal carries its own remedy", () => {
   it("BOTH surfaces that can raise it offer the way out", () => {
     const create = read("./screens/CreateAgent.tsx");
     const wallet = read("./screens/Wallet.tsx");
-    for (const [name, src] of [
-      ["CreateAgent", create],
-      ["Wallet", wallet],
+    for (const [name, src, key] of [
+      ["CreateAgent", create, "onboard.reviewTokens"],
+      ["Wallet", wallet, "wallet.reviewTokens"],
     ] as const) {
       assert.match(src, /isWallTooWide\(error\)/, `${name} must key the remedy off the refusal`);
-      assert.match(src, /Review custom tokens/, `${name} must offer the action`);
+      // i18n: the action lives in the catalogue now; pin the key at the call
+      // site and the wording in EN.
+      assert.match(src, new RegExp(`t\\("${key}"\\)`), `${name} must offer the action`);
       assert.match(src, /href="\/settings"/, `${name} must point somewhere reachable`);
     }
+    assert.match(EN_TEXT, /Review custom tokens/, "the remedy action wording survives in EN");
     // Create/restore, desync recovery, and an active grant's renewal all have
     // separate panels. The actual renewal click is rendered and tested in
     // wallet-renewal.test.ts; merely counting the first two missed this bug.
     assert.equal(
-      (wallet.match(/Review custom tokens/g) ?? []).length,
+      (wallet.match(/t\("wallet\.reviewTokens"\)/g) ?? []).length,
       3,
       "all three grant panels must carry it",
     );

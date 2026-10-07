@@ -13,6 +13,7 @@ import {
 } from "./vendor/dither-kit/dither-paint";
 import { seedOfColor } from "./vendor/dither-kit/palette";
 import { money, pctPts } from "./live";
+import { useT } from "@/lib/i18n";
 
 export type ChartRider = { name: string; slug: string | null; index: number };
 
@@ -51,6 +52,7 @@ export function DitherChart({
     () => points.filter((p) => Number.isFinite(p.value)),
     [points],
   );
+  const t = useT();
   const canvas = useRef<HTMLCanvasElement>(null);
   const [selected, setSelected] = useState<number | null>(null);
   const down = data.length > 1 && data[data.length - 1]!.value < data[0]!.value;
@@ -93,7 +95,7 @@ export function DitherChart({
 
   if (data.length < 2)
     return (
-      <p className="dither-empty">Performance history isn’t available yet.</p>
+      <p className="dither-empty">{t("profile.noHistory")}</p>
     );
   const last = data[data.length - 1]!;
   const current = point ?? last;
@@ -255,6 +257,7 @@ export function PerformanceChart({
   /** See DitherChart — off where the figure is already printed above. */
   restate?: boolean;
 }) {
+  const t = useT();
   const points = useMemo(() => {
     const clean = values.filter(Number.isFinite);
     const first = clean[0];
@@ -272,16 +275,16 @@ export function PerformanceChart({
       value: balance ? value : (value / first - 1) * 100,
       label:
         i === 0
-          ? "Start of history"
+          ? t("common.chartStart")
           : i === clean.length - 1
-            ? "Latest"
-            : `Observation ${i + 1}`,
+            ? t("common.chartLatest")
+            : t("common.chartObs", { n: i + 1 }),
     }));
   }, [values,balance]);
   return (
     <DitherChart
       points={points}
-      label={balance ? "Portfolio balance" : "Performance history"}
+      label={balance ? t("you.portfolioBalance") : t("common.perfHistory")}
       className="performance-chart"
       // `money`, not a local toFixed — the balance printed directly above this
       // chart uses it, and the two disagreed above $1,000 ("$1234.50" against

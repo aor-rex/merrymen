@@ -19,6 +19,7 @@
 import { useEffect, useId, useRef, useState, type ReactNode } from "react";
 import { ArrowUpRight, Check, ChevronDown, Copy, Plug } from "lucide-react";
 import { claudeCodePluginCommands, installCommands, installLinks } from "@/mcp/install-links";
+import { useRichT, useT } from "@/lib/i18n";
 import { BrandLockup } from "../BrandLockup";
 
 /** The fields of a GET /api/mcp/connections row that the status line reads. */
@@ -90,7 +91,8 @@ function selectText(id: string): void {
  * announced to screen readers. The timer dies with the component: a stray
  * timeout outliving its component once broke CI.
  */
-function CopyButton({ text, target, label, children = "Copy" }: { text: string; target: string; label: string; children?: ReactNode }) {
+function CopyButton({ text, target, label, children }: { text: string; target: string; label: string; children?: ReactNode }) {
+  const t = useT();
   const [state, setState] = useState<"idle" | "copied" | "manual">("idle");
   const timer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const alive = useRef(false);
@@ -125,10 +127,10 @@ function CopyButton({ text, target, label, children = "Copy" }: { text: string; 
     <>
       <button type="button" className="mcp-hub-copy" aria-label={label} onClick={() => void copy()}>
         {state === "copied" ? <Check size={14} aria-hidden /> : <Copy size={14} aria-hidden />}
-        {state === "copied" ? "Copied" : children}
+        {state === "copied" ? t("connect.mcpCopied") : (children ?? t("connect.mcpCopy"))}
       </button>
       <span className={state === "manual" ? "mcp-hub-copy-note" : "sr-only"} role="status" aria-live="polite">
-        {state === "copied" ? "Copied" : state === "manual" ? "Couldn’t copy automatically. It’s selected, so copy it from there." : ""}
+        {state === "copied" ? t("connect.mcpCopied") : state === "manual" ? t("connect.mcpCopyManual") : ""}
       </span>
     </>
   );
@@ -136,10 +138,11 @@ function CopyButton({ text, target, label, children = "Copy" }: { text: string; 
 
 /** A link that opens in a new tab and says so to screen readers. */
 function Out({ href, className, label, children }: { href: string; className?: string; label?: string; children: ReactNode }) {
+  const t = useT();
   return (
-    <a className={className} href={href} target="_blank" rel="noopener noreferrer" aria-label={label ? `${label} (opens in a new tab)` : undefined}>
+    <a className={className} href={href} target="_blank" rel="noopener noreferrer" aria-label={label ? `${label}${t("connect.newTab")}` : undefined}>
       {children}
-      {!label && <span className="sr-only"> (opens in a new tab)</span>}
+      {!label && <span className="sr-only">{t("connect.newTab")}</span>}
     </a>
   );
 }
@@ -161,6 +164,8 @@ function Row({ name, children }: { name: string; children: ReactNode }) {
 }
 
 export function McpConnectClient({ url, app, enabled, disabledWhy }: { url: string; app: string; enabled: boolean; disabledWhy: string | null }) {
+  const t = useT();
+  const rt = useRichT();
   const links = installLinks(url);
   const commands = installCommands(url);
   // The Claude Code plugin, offered only where this page serves the address it points at.
@@ -196,137 +201,137 @@ export function McpConnectClient({ url, app, enabled, disabledWhy }: { url: stri
     <div className="terminal-host partner-connect mcp-connect">
       <header className="connect-header">
         <BrandLockup />
-        <span className="connect-header-label">Connect an AI assistant</span>
+        <span className="connect-header-label">{t("connect.mcpHeader")}</span>
       </header>
       <main className="connect-main">
         <div className="connect-context">
-          <span className="connect-eyebrow">YOUR AGENT, IN YOUR ASSISTANT</span>
-          <h1>Your Merryman,<br />in Claude.</h1>
-          <p>Ask about its trades, your portfolio and the market in plain words. Your assistant only gets what you allow, and it can never move your money.</p>
+          <span className="connect-eyebrow">{t("connect.consentEyebrow")}</span>
+          <h1>{t("connect.mcpTitleA")}<br />{t("connect.mcpTitleB")}</h1>
+          <p>{t("connect.mcpIntro")}</p>
         </div>
         <div className="connect-panel mcp-hub">
           {!enabled ? <>
-            <h2>Assistant connections are switched off on this server</h2>
-            {disabledWhy && <p className="mcp-hub-fine">Reason: {disabledWhy}.</p>}
-            <a className="connect-cancel" href="/">Back to Merrymen</a>
+            <h2>{t("connect.mcpOff")}</h2>
+            {disabledWhy && <p className="mcp-hub-fine">{t("connect.mcpOffWhy", { why: disabledWhy })}</p>}
+            <a className="connect-cancel" href="/">{t("connect.mcpBack")}</a>
           </> : <>
             {connected && (
               <p className="mcp-hub-status">
                 <Plug size={14} aria-hidden />
-                <span>Connected: {connected.names} · {connected.lastUsed} · <a href="/connect/apps" aria-label="Manage connected apps">Manage</a></span>
+                <span>{t("connect.mcpStatus", { names: connected.names, lastUsed: connected.lastUsed })} <a href="/connect/apps" aria-label={t("connect.mcpManageLabel")}>{t("connect.mcpManage")}</a></span>
               </p>
             )}
 
             <section className="mcp-hub-section" aria-labelledby="mcp-hub-claude">
-              <h2 id="mcp-hub-claude">Add to Claude</h2>
-              {connected?.claude && <p className="mcp-hub-fine">Claude is already connected. You only need this again for another Claude account.</p>}
-              <Out className="flow-primary" href={links.claude}>Add to Claude <ArrowUpRight size={16} aria-hidden /></Out>
+              <h2 id="mcp-hub-claude">{t("connect.mcpAddClaude")}</h2>
+              {connected?.claude && <p className="mcp-hub-fine">{t("connect.mcpClaudeDone")}</p>}
+              <Out className="flow-primary" href={links.claude}>{t("connect.mcpAddClaude")} <ArrowUpRight size={16} aria-hidden /></Out>
               <ol className="mcp-hub-steps">
-                <li>Claude opens with Merrymen already filled in. Click <b>Continue</b>, then <b>Connect</b>.</li>
-                <li>Merrymen opens. Sign in if asked, then click <b>Allow</b>.</li>
-                <li>Back in Claude, ask “Why hasn’t my agent traded?”</li>
+                <li>{rt("connect.mcpStep1", { cont: t("connect.mcpContinue"), conn: t("connect.mcpConnect") })}</li>
+                <li>{rt("connect.mcpStep2", { allow: t("connect.mcpAllow") })}</li>
+                <li>{t("connect.mcpStep3")}</li>
               </ol>
-              <p className="mcp-hub-fine">Add it once and it works on claude.ai and in the Claude desktop and mobile apps. Claude Code signed in to the same account gets it too.</p>
-              <p className="mcp-hub-fine">On a Team or Enterprise plan? Your organisation’s owner adds it once: <Out href={links.claudeOrg}>add Merrymen for your organisation</Out>. Everyone else then finds Merrymen in Claude under Customize → Connectors and clicks Connect. Claude’s free plan allows one custom connector.</p>
+              <p className="mcp-hub-fine">{t("connect.mcpClaudeNote")}</p>
+              <p className="mcp-hub-fine">{t("connect.mcpOrgPre")} <Out href={links.claudeOrg}>{t("connect.mcpOrgLink")}</Out>{t("connect.mcpOrgPost")}</p>
             </section>
 
             <section className="mcp-hub-section" aria-labelledby="mcp-hub-others">
-              <h2 id="mcp-hub-others" className="mcp-hub-h2">Other assistants</h2>
+              <h2 id="mcp-hub-others" className="mcp-hub-h2">{t("connect.mcpOthers")}</h2>
               <ul className="mcp-hub-rows">
                 <Row name="Claude Code">
                   {plugin ? <>
-                    <p>In Claude Code, run these one at a time:</p>
-                    <Command lines={[plugin[0]]} label="Copy the first Claude Code command" />
-                    <Command lines={[plugin[1]]} label="Copy the second Claude Code command" />
-                    <p>Then type <code>/mcp</code>, choose Merrymen and Authenticate. You get <code>/merrymen:status</code>, <code>/merrymen:why</code>, <code>/merrymen:portfolio</code> and more, or just ask.</p>
-                    <p className="mcp-hub-fine">Added Merrymen to Claude already? Claude Code signed in to the same account has it too. Without the plugin, from a terminal:</p>
-                  </> : <p>Added it to Claude already? It’s in Claude Code too. Otherwise:</p>}
-                  <Command lines={commands.claudeCode} label="Copy both Claude Code terminal commands" />
-                  <p className="mcp-hub-fine">Or just tell Claude Code:</p>
-                  <Command lines={[`Set up the Merrymen MCP server. Instructions: ${llms}`]} label="Copy the sentence to tell Claude Code" />
+                    <p>{t("connect.mcpPluginOnce")}</p>
+                    <Command lines={[plugin[0]]} label={t("connect.mcpCopyCmd1")} />
+                    <Command lines={[plugin[1]]} label={t("connect.mcpCopyCmd2")} />
+                    <p>{t("connect.mcpPluginThenPre")}<code>/mcp</code>{t("connect.mcpPluginThenMid")}<code>/merrymen:status</code>, <code>/merrymen:why</code>, <code>/merrymen:portfolio</code>{t("connect.mcpPluginThenPost")}</p>
+                    <p className="mcp-hub-fine">{t("connect.mcpPluginAlt")}</p>
+                  </> : <p>{t("connect.mcpPluginNo")}</p>}
+                  <Command lines={commands.claudeCode} label={t("connect.mcpCopyClaudeCode")} />
+                  <p className="mcp-hub-fine">{t("connect.mcpTellHint")}</p>
+                  <Command lines={[t("connect.mcpTell", { llms })]} label={t("connect.mcpCopyTell")} />
                 </Row>
                 <Row name="ChatGPT">
-                  <p>Turn on Developer mode (Settings → Security and login), then create an app with the address below.</p>
+                  <p>{t("connect.mcpChatgpt")}</p>
                   <div className="mcp-hub-actions">
-                    <CopyButton text={url} target={addressId} label="Copy address for ChatGPT">Copy address</CopyButton>
-                    <Out className="mcp-hub-action" href={links.chatgpt}>Open ChatGPT <ArrowUpRight size={14} aria-hidden /></Out>
+                    <CopyButton text={url} target={addressId} label={t("connect.mcpCopyAddressLabel")}>{t("connect.mcpCopyAddress")}</CopyButton>
+                    <Out className="mcp-hub-action" href={links.chatgpt}>{t("connect.mcpOpenChatgpt")} <ArrowUpRight size={14} aria-hidden /></Out>
                   </div>
                 </Row>
                 <Row name="Codex">
-                  <Command lines={commands.codex} label="Copy the Codex command" />
-                  <p>It opens Merrymen to sign in by itself. The Codex app and IDE extension pick it up too.</p>
+                  <Command lines={commands.codex} label={t("connect.mcpCopyCodex")} />
+                  <p>{t("connect.mcpCodexNote")}</p>
                 </Row>
                 <Row name="Cursor">
                   <div className="mcp-hub-actions">
-                    <Out className="mcp-hub-action" href={links.cursor}>Add to Cursor <ArrowUpRight size={14} aria-hidden /></Out>
+                    <Out className="mcp-hub-action" href={links.cursor}>{t("connect.mcpAddCursor")} <ArrowUpRight size={14} aria-hidden /></Out>
                   </div>
                 </Row>
                 <Row name="VS Code">
                   <div className="mcp-hub-actions">
-                    <Out className="mcp-hub-action" href={links.vscode}>Add to VS Code <ArrowUpRight size={14} aria-hidden /></Out>
-                    <Out className="mcp-hub-minor" href={links.vscodeInsiders} label="Add to VS Code Insiders">Insiders</Out>
+                    <Out className="mcp-hub-action" href={links.vscode}>{t("connect.mcpAddVscode")} <ArrowUpRight size={14} aria-hidden /></Out>
+                    <Out className="mcp-hub-minor" href={links.vscodeInsiders} label={t("connect.mcpInsidersLabel")}>{t("connect.mcpInsiders")}</Out>
                   </div>
                 </Row>
               </ul>
               <details className="mcp-hub-more">
-                <summary>More apps <ChevronDown size={16} aria-hidden /></summary>
+                <summary>{t("connect.mcpMore")} <ChevronDown size={16} aria-hidden /></summary>
                 <ul className="mcp-hub-rows">
                   <Row name="Gemini CLI">
-                    <Command lines={commands.gemini} label="Copy the Gemini CLI command" />
-                    <p>Then type <code>/mcp auth merrymen</code> inside Gemini CLI to sign in.</p>
+                    <Command lines={commands.gemini} label={t("connect.mcpCopyGemini")} />
+                    <p>{t("connect.mcpPluginThenPre")}<code>/mcp auth merrymen</code>{t("connect.mcpGeminiPost")}</p>
                   </Row>
                   <Row name="Kiro">
-                    <div className="mcp-hub-actions"><Out className="mcp-hub-action" href={links.kiro}>Add to Kiro <ArrowUpRight size={14} aria-hidden /></Out></div>
+                    <div className="mcp-hub-actions"><Out className="mcp-hub-action" href={links.kiro}>{t("connect.mcpAddKiro")} <ArrowUpRight size={14} aria-hidden /></Out></div>
                   </Row>
                   {/* App links (lmstudio://, goose://) open the app itself, so no new tab. */}
                   <Row name="LM Studio">
-                    <div className="mcp-hub-actions"><a className="mcp-hub-action" href={links.lmstudio}>Add to LM Studio</a></div>
+                    <div className="mcp-hub-actions"><a className="mcp-hub-action" href={links.lmstudio}>{t("connect.mcpAddLm")}</a></div>
                   </Row>
                   <Row name="Goose">
-                    <div className="mcp-hub-actions"><a className="mcp-hub-action" href={links.goose}>Add to Goose</a></div>
+                    <div className="mcp-hub-actions"><a className="mcp-hub-action" href={links.goose}>{t("connect.mcpAddGoose")}</a></div>
                   </Row>
                   <Row name="Windsurf / Devin">
-                    <Command lines={commands.devin} label="Copy both Windsurf and Devin commands" />
+                    <Command lines={commands.devin} label={t("connect.mcpCopyDevin")} />
                   </Row>
                   <Row name="Anything else">
-                    <p>Use the server address. It signs in with OAuth; apps that can’t can use a personal access token from <a href="/connect/apps">Connected apps</a>.</p>
+                    <p>{t("connect.mcpOtherPre")}<a href="/connect/apps">{t("connect.appsLink")}</a>.</p>
                   </Row>
                 </ul>
               </details>
             </section>
 
             <section className="mcp-hub-section mcp-hub-address" aria-labelledby="mcp-hub-address">
-              <h2 id="mcp-hub-address" className="mcp-hub-h2">Server address</h2>
+              <h2 id="mcp-hub-address" className="mcp-hub-h2">{t("connect.mcpServerAddr")}</h2>
               <div className="mcp-hub-address-row">
                 <code id={addressId}>{url}</code>
-                <CopyButton text={url} target={addressId} label="Copy the server address" />
+                <CopyButton text={url} target={addressId} label={t("connect.mcpCopyServerLabel")} />
               </div>
             </section>
 
             <section className="mcp-hub-section mcp-hub-know" aria-labelledby="mcp-hub-know">
-              <h2 id="mcp-hub-know" className="mcp-hub-h2">Good to know</h2>
+              <h2 id="mcp-hub-know" className="mcp-hub-h2">{t("connect.mcpKnow")}</h2>
               <ul>
-                <li>Claude asks before each action. To stop it asking for read-only look-ups, open Claude → Customize → Connectors → Merrymen and set Read-only tools to Always allow.</li>
-                <li>It only sees the agent and permissions you allow when you connect. Disconnect it any time on <a href="/connect/apps">Connected apps</a>.</li>
-                <li>It can suggest trades or setting changes only if you allow that, and nothing happens until you approve them in Merrymen.</li>
-                <li>It can never move your funds, see your keys, turn on live trading or loosen your signed limits.</li>
-                <li>Paper (practice) results are always kept apart from real money.</li>
+                <li>{t("connect.mcpKnow1")}</li>
+                <li>{t("connect.mcpKnow2pre")}<a href="/connect/apps">{t("connect.appsLink")}</a>.</li>
+                <li>{t("connect.mcpKnow3")}</li>
+                <li>{t("connect.mcpKnow4")}</li>
+                <li>{t("connect.mcpKnow5")}</li>
               </ul>
             </section>
 
             {/* Small print for an assistant that fetched this page while setting Merrymen up: llms.txt in brief. */}
             <section className="mcp-hub-section mcp-hub-ai" aria-labelledby="mcp-hub-ai">
-              <h2 id="mcp-hub-ai">For AI assistants</h2>
+              <h2 id="mcp-hub-ai">{t("connect.mcpAi")}</h2>
               <ul>
-                <li>Claude Code: run <code>claude mcp list</code> first; an entry at <code>{url}</code> means it is already set up. Otherwise run <code>{commands.claudeCode[0]}</code>, then ask the user to type <code>/mcp</code>, choose Merrymen and Authenticate (do not run <code>claude mcp login</code> yourself). No API key or token is needed; never ask for one.</li>
-                <li>claude.ai, Claude Desktop or Claude mobile: you cannot add it from a chat. Give the user the <Out href={links.claude}>Add to Claude link</Out>.</li>
-                <li>Full instructions: <a href={llms}>{llms}</a></li>
+                <li>{t("connect.mcpAiRun")}<code>claude mcp list</code>{t("connect.mcpAiEntry")}<code>{url}</code>{t("connect.mcpAiSetup")}<code>{commands.claudeCode[0]}</code>{t("connect.mcpAiType")}<code>/mcp</code>{t("connect.mcpAiAuth")}<code>claude mcp login</code>{t("connect.mcpAiNoKey")}</li>
+                <li>{t("connect.mcpAiChatPre")}<Out href={links.claude}>{t("connect.mcpAiChatLink")}</Out>.</li>
+                <li>{t("connect.mcpAiFull")}<a href={llms}>{llms}</a></li>
               </ul>
             </section>
           </>}
         </div>
       </main>
-      <footer className="connect-footer">Merrymen · <a href="/connect/apps">Connected apps</a></footer>
+      <footer className="connect-footer">{t("connect.mcpFooterBrand")} <a href="/connect/apps">{t("connect.appsLink")}</a></footer>
     </div>
   );
 }

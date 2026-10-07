@@ -1,6 +1,7 @@
 "use client";
 
 import { useMemo } from "react";
+import { useT } from "@/lib/i18n";
 import { useLivingCanvas } from "@/components/useLivingCanvas";
 import type { WallTape } from "@/lib/read-wall-tape";
 
@@ -81,6 +82,7 @@ export function WallBand({
     window.matchMedia?.("(prefers-reduced-motion: reduce)").matches === true;
   const frozen = still || reduced;
 
+  const t = useT();
   const plan = useMemo<Plan>(() => {
     const n = tape.cells.length;
     const release = new Float32Array(n);
@@ -261,9 +263,7 @@ export function WallBand({
       <canvas ref={ref} className="mm-wall-canvas" />
       {empty && (
         <figcaption className="mm-wall-cap mono">
-          {tape.source === "none"
-            ? "couldn't read the ledger just now — this is what we don't know"
-            : "nothing has been put to the wall in the last day"}
+          {tape.source === "none" ? t("common.wallUnread") : t("common.wallEmpty")}
         </figcaption>
       )}
     </figure>

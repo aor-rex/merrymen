@@ -7,6 +7,7 @@ import { BalanceFigure } from "../studio";
 import Link from "next/link";
 import { SlidersHorizontal, Wallet, Settings, ChevronRight, Plug } from "lucide-react";
 import { CONNECT_ASSISTANT_HREF, useConnectAssistantOffered } from "../assistant-connect";
+import { useT } from "@/lib/i18n";
 
 export function You({
   onLimits,
@@ -34,12 +35,13 @@ export function You({
 }) {
   // Before the early return: a hook may not be skipped on some renders.
   const assistants = useConnectAssistantOffered();
+  const t = useT();
   if (!mine)
     return (
       <Empty
         kind="profile"
-        title="Your agents belong here."
-        action={{ label: "Fund an agent", onClick: onDeposit }}
+        title={t("you.emptyTitle")}
+        action={{ label: t("you.emptyAction"), onClick: onDeposit }}
       />
     );
   const owner = mine.owner ?? "You";
@@ -52,7 +54,7 @@ export function You({
   return (
     <div className="account-page">
       <header className="account-header">
-        <h1>Profile</h1>
+        <h1>{t("you.title")}</h1>
       </header>
       <div className="account-person">
         <span className="account-avatar" aria-hidden>
@@ -60,33 +62,35 @@ export function You({
         </span>
         <div>
           <h2>{ownerLabel}</h2>
-          <p>1 agent</p>
+          <p>{t("you.agentCount")}</p>
         </div>
-        <span className="profile-mode">{mine.statusLabel ?? "Offline"}</span>
+        <span className="profile-mode">{mine.statusLabel ?? t("you.offline")}</span>
       </div>
       <section className="account-balance" aria-label="Account balance">
-        <span className="account-label">Portfolio balance</span>
+        <span className="account-label">{t("you.portfolioBalance")}</span>
         <strong>
           <BalanceFigure value={mine.equity} />
         </strong>
         <p className={mine.chg24 == null ? "meta" : mine.chg24 < 0 ? "down" : "up"}>
           {mine.chg24 == null
-            ? "Daily change unavailable"
-            : `${mine.chg24 < 0 ? "−" : "+"}${money(Math.abs(mine.chg24))}${change == null ? "" : ` (${pctPts(change)})`} today`}
+            ? t("you.changeUnavailable")
+            : t("you.changeToday", {
+                value: `${mine.chg24 < 0 ? "−" : "+"}${money(Math.abs(mine.chg24))}${change == null ? "" : ` (${pctPts(change)})`}`,
+              })}
         </p>
         <PerformanceChart balance values={history} height={68} restate={false} />
         <div className="profile-funding">
         <button type="button" className="account-fund" onClick={onDeposit}>
-          Add funds
+          {t("you.addFunds")}
         </button>
         <button type="button" className="account-fund" onClick={onWithdraw}>
-          Withdraw
+          {t("you.withdraw")}
         </button>
         </div>
       </section>
       <section className="account-section account-agent-section">
         <div className="account-section-title">
-          <h2>Your agent</h2>
+          <h2>{t("you.yourAgent")}</h2>
           <span>1</span>
         </div>
         <button type="button" className="account-agent" onClick={onDesk}>
@@ -97,33 +101,32 @@ export function You({
           </span>
           <span className="account-agent-value">
             <strong>{money(mine.equity)}</strong>
-            <small>{mine.statusLabel ?? "Offline"} ↗</small>
+            <small>{mine.statusLabel ?? t("you.offline")} ↗</small>
           </span>
         </button>
       </section>
       <section className="account-section profile-account">
         <div className="account-section-title">
-          <h2>Account</h2>
+          <h2>{t("you.account")}</h2>
         </div>
         <button type="button" className="account-control" onClick={onLimits}>
           <SlidersHorizontal size={24} aria-hidden="true"/>
           <span>
-            <strong>Trading limits</strong>
+            <strong>{t("you.tradingLimits")}</strong>
             <small>
-              {money(perTrade)} per trade · {money(perDay)} per
-              day
+              {t("you.limitsDetail", { perTrade: money(perTrade), perDay: money(perDay) })}
             </small>
           </span>
           <ChevronRight size={18} aria-hidden="true"/>
         </button>
-        <button type="button" className="account-control" onClick={onStop}><Wallet size={24} aria-hidden="true"/><span><strong>Wallet & permissions</strong></span><ChevronRight size={18} aria-hidden="true"/></button>
-        <Link className="account-control" href="/settings"><Settings size={24} aria-hidden="true"/><span><strong>Settings</strong></span><ChevronRight size={18} aria-hidden="true"/></Link>
+        <button type="button" className="account-control" onClick={onStop}><Wallet size={24} aria-hidden="true"/><span><strong>{t("you.walletPermissions")}</strong></span><ChevronRight size={18} aria-hidden="true"/></button>
+        <Link className="account-control" href="/settings"><Settings size={24} aria-hidden="true"/><span><strong>{t("you.settings")}</strong></span><ChevronRight size={18} aria-hidden="true"/></Link>
         {/* Hosted only: a self-hosted install has no assistant connections (assistant-connect.ts). */}
-        {assistants && <Link className="account-control" href={CONNECT_ASSISTANT_HREF}><Plug size={24} aria-hidden="true"/><span><strong>Connect to Claude</strong><small>Ask Claude about your agent</small></span><ChevronRight size={18} aria-hidden="true"/></Link>}
+        {assistants && <Link className="account-control" href={CONNECT_ASSISTANT_HREF}><Plug size={24} aria-hidden="true"/><span><strong>{t("you.connectClaude")}</strong><small>{t("you.connectClaudeSub")}</small></span><ChevronRight size={18} aria-hidden="true"/></Link>}
         <section className="profile-usage" aria-label="Daily limit usage">
         <div className="account-usage">
           <div>
-            <span>Used today</span>
+            <span>{t("you.usedToday")}</span>
             <span>
               {money(spent)} / {money(perDay)}
             </span>

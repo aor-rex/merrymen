@@ -29,6 +29,10 @@ const PANEL = readFileSync(
   "utf8",
 );
 const RECOVER = readFileSync(path.join(__dirname, "recover.ts"), "utf8");
+const EN_TEXT = readFileSync(
+  path.join(__dirname, "..", "..", "web", "src", "lib", "messages", "en.ts"),
+  "utf8",
+);
 const code = (s: string) => s.replace(/\/\*[\s\S]*?\*\//g, " ").replace(/\/\/[^\n]*/g, " ");
 
 /** Shogun's real state at the moment this was written. */
@@ -82,10 +86,15 @@ describe("the confirmation names everything that will move", () => {
   })();
 
   it("class vault, smart account, native ETH, and destination — all four", () => {
-    assert.match(dialog, /"CLASS VAULT"/, "the vault");
-    assert.match(dialog, /SMART ACCOUNT \$\{smartAccount/, "the account");
-    assert.match(dialog, /"NATIVE ETH"/, "the ETH leg that used to be omitted");
-    assert.match(dialog, /"DESTINATION"/, "and where it all goes");
+    // i18n: the headings live in the catalogue now; pin the keys at the call
+    // site and the wording in EN.
+    assert.match(dialog, /t\("common\.recVaultHead"\)/, "the vault");
+    assert.match(dialog, /t\("common\.recAcctHead"\)/, "the account");
+    assert.match(dialog, /t\("common\.recEthHead"\)/, "the ETH leg that used to be omitted");
+    assert.match(dialog, /t\("common\.recConfirmDest"\)/, "and where it all goes");
+    assert.match(EN_TEXT, /CLASS VAULT/);
+    assert.match(EN_TEXT, /NATIVE ETH/);
+    assert.match(EN_TEXT, /DESTINATION/);
   });
 
   it("the ETH figure comes from the plan, not from the UI's own arithmetic", () => {
@@ -99,7 +108,10 @@ describe("the confirmation names everything that will move", () => {
   });
 
   it("says 'approximately', because the gas price is read again at execution", () => {
-    assert.match(dialog, /approximately/);
+    // i18n: the sentence lives in the catalogue now; pin the key at the call
+    // site and the wording in EN.
+    assert.match(dialog, /t\("common\.recEthRec"/);
+    assert.match(EN_TEXT, /approximately/);
   });
 
   it("omits the ETH section entirely rather than promising an unpriceable amount", () => {

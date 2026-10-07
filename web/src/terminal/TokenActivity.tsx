@@ -3,29 +3,31 @@ import { count, fullDateTime, timeOnly } from "@/lib/format";
 import type { PoolEvidence } from '../../../worker/src/venues/pool-evidence';
 import type { DiscoveryRow } from '@/lib/read-discoveries';
 import { coinPrice, compactUsd, money } from './live';
+import { useT } from "@/lib/i18n";
 
 export function TokenActivity({ coin, evidence, loading }: { coin: DiscoveryRow | null; evidence: PoolEvidence | null; loading: boolean }) {
-  if (loading) return <section className="token-activity" aria-busy="true"><h3>Market activity</h3><p>Loading pool activity…</p></section>;
-  if (!coin) return <section className="token-activity"><h3>Market activity</h3><p>Pool activity is unavailable for this token.</p></section>;
+  const t = useT();
+  if (loading) return <section className="token-activity" aria-busy="true"><h3>{t("home.marketActivity")}</h3><p>{t("common.poolLoading")}</p></section>;
+  if (!coin) return <section className="token-activity"><h3>{t("home.marketActivity")}</h3><p>{t("common.poolUnavailable")}</p></section>;
   const trades = evidence?.trades;
   const stale = !trades?.observedAt || Date.now() - trades.observedAt > 120000;
   return <section className="token-activity">
-    <header><h3>Market activity</h3><span>{coin.venue} · Indexed pool data</span></header>
+    <header><h3>{t("home.marketActivity")}</h3><span>{t("common.activitySource", { venue: coin.venue })}</span></header>
     <div className="activity-facts">
-      <div><span>24h volume</span><strong>{compactUsd(coin.volume24hUsd)}</strong></div>
-      <div><span>{coin.onCurve ? 'Virtual / indexed reserve' : 'Indexed liquidity'}</span><strong>{compactUsd(coin.reserveUsd)}</strong></div>
-      <div><span>24h buyers</span><strong>{coin.buyers24h === undefined ? '—' : count(coin.buyers24h)}</strong></div>
+      <div><span>{t("common.vol24")}</span><strong>{compactUsd(coin.volume24hUsd)}</strong></div>
+      <div><span>{coin.onCurve ? t("common.reserveCurve") : t("common.reservePool")}</span><strong>{compactUsd(coin.reserveUsd)}</strong></div>
+      <div><span>{t("common.buyers24")}</span><strong>{coin.buyers24h === undefined ? '—' : count(coin.buyers24h)}</strong></div>
     </div>
-    <p className="activity-note">{coin.onCurve ? 'Curve reserves can include virtual liquidity and are not an available exit quote.' : 'Indexed liquidity is not a guaranteed execution price.'}</p>
-    <div className="activity-scroll"><table className="activity-windows"><caption>Reported trading windows</caption><thead><tr><th scope="col">Window</th><th scope="col">Volume</th><th scope="col">Buys</th><th scope="col">Sells</th></tr></thead><tbody>
+    <p className="activity-note">{coin.onCurve ? t("common.curveNote") : t("common.liquidityNote")}</p>
+    <div className="activity-scroll"><table className="activity-windows"><caption>{t("common.reportedWindows")}</caption><thead><tr><th scope="col">{t("common.colWindow")}</th><th scope="col">{t("common.colVolume")}</th><th scope="col">{t("common.colBuys")}</th><th scope="col">{t("common.colSells")}</th></tr></thead><tbody>
       {(['m5', 'h1', 'h6', 'h24'] as const).map((w, i) => <tr key={w}><th scope="row">{['5m', '1h', '6h', '24h'][i]}</th><td>{compactUsd(coin.buckets[w].volumeUsd)}</td><td>{coin.buckets[w].buys === undefined ? '—' : count(coin.buckets[w].buys)}</td><td>{coin.buckets[w].sells === undefined ? '—' : count(coin.buckets[w].sells)}</td></tr>)}
     </tbody></table></div>
-    <h4>Recent pool buys & sells</h4>
-    <p className="activity-note">Public market trades, not your agent’s fills. Latest indexed sample; may omit trades.</p>
-    {!trades || trades.failed ? <p role="status">Recent trades are temporarily unavailable.</p> : <>
-      <p className="activity-note">{stale ? 'Older snapshot' : 'Snapshot'} · {trades.observedAt ? fullDateTime(trades.observedAt) : 'Time unavailable'}</p>
-      {trades.data.length === 0 ? <p>No matching trades were returned in this sample.</p> : <div className="activity-scroll"><table><thead><tr><th scope="col">Side</th><th scope="col">Value</th><th scope="col">Token price</th><th scope="col">Time / transaction</th></tr></thead><tbody>
-        {trades.data.slice(0, 12).map(t => <tr key={t.id}><td className={t.side === 'buy' ? 'activity-buy' : 'activity-sell'}>{t.side === 'buy' ? 'Buy' : 'Sell'}</td><td>{t.usd === null ? "—" : money(t.usd)}</td><td>{coinPrice(t.priceUsd)}</td><td><a href={`https://robinhoodchain.blockscout.com/tx/${t.tx}`} target="_blank" rel="noreferrer" aria-label={`View ${t.side} transaction ${t.tx}`}>{timeOnly(t.time * 1000)} ↗</a></td></tr>)}
+    <h4>{t("common.recentPool")}</h4>
+    <p className="activity-note">{t("common.publicTrades")}</p>
+    {!trades || trades.failed ? <p role="status">{t("common.recentUnavailable")}</p> : <>
+      <p className="activity-note">{stale ? t("common.snapshotOld") : t("common.snapshotNow")} · {trades.observedAt ? fullDateTime(trades.observedAt) : t("profile.timeUnknown")}</p>
+      {trades.data.length === 0 ? <p>{t("common.noSampleTrades")}</p> : <div className="activity-scroll"><table><thead><tr><th scope="col">{t("common.colSide")}</th><th scope="col">{t("common.colValue")}</th><th scope="col">{t("token.tokenPrice")}</th><th scope="col">{t("common.colTimeTx")}</th></tr></thead><tbody>
+        {trades.data.slice(0, 12).map(trade => <tr key={trade.id}><td className={trade.side === 'buy' ? 'activity-buy' : 'activity-sell'}>{trade.side === 'buy' ? t("profile.buy") : t("profile.sell")}</td><td>{trade.usd === null ? "—" : money(trade.usd)}</td><td>{coinPrice(trade.priceUsd)}</td><td><a href={`https://robinhoodchain.blockscout.com/tx/${trade.tx}`} target="_blank" rel="noreferrer" aria-label={`View ${trade.side} transaction ${trade.tx}`}>{timeOnly(trade.time * 1000)} ↗</a></td></tr>)}
       </tbody></table></div>}
     </>}
   </section>;

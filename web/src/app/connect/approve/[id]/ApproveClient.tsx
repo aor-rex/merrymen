@@ -12,6 +12,8 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { AlertTriangle, ArrowRight, Check, ShieldCheck, X } from "lucide-react";
 import { fullDateTime } from "@/lib/format";
 import { SignIn } from "@/terminal/HostedControls";
+import { useT } from "@/lib/i18n";
+import type { MessageKey } from "@/lib/messages/en";
 import { BrandLockup } from "../../BrandLockup";
 
 import { TERMINAL, approvable, bookBox, headline, resumeDecision, short, text, usdg, type SettingsCheck, type View } from "./approve-view";
@@ -45,16 +47,18 @@ export async function call<T>(id: string, body?: Record<string, unknown>): Promi
  * the approval until a fresh proposal.
  */
 function SettingsRows({ c }: { c: SettingsCheck }) {
+  const t = useT();
   return <>
-    {c.changed_since.length > 0 && <div className="connect-boundary mcp-warn"><AlertTriangle size={18} aria-hidden /><p><b>Your settings changed since this was proposed.</b> Approving is refused; ask your assistant for a fresh proposal.</p></div>}
+    {c.changed_since.length > 0 && <div className="connect-boundary mcp-warn"><AlertTriangle size={18} aria-hidden /><p><b>{t("connect.approveSettingsChangedTitle")}</b> {t("connect.approveSettingsChangedBody")}</p></div>}
     <ul className="mcp-checks">{c.rows.map((d) => <li key={d.key}><label><span>
-      <strong>{d.label}: {d.current === d.proposed ? <>{d.current} (no change)</> : <>{d.current} → {d.proposed}</>}</strong>
-      <span>{d.changed ? `It was ${d.when_proposed} when this was proposed. ` : ""}{d.help}</span>
+      <strong>{d.label}: {d.current === d.proposed ? <>{d.current} {t("connect.approveNoChange")}</> : <>{d.current} → {d.proposed}</>}</strong>
+      <span>{d.changed ? `${t("connect.approveWasWhen", { when: d.when_proposed })} ` : ""}{d.help}</span>
     </span></label></li>)}</ul>
   </>;
 }
 
 function Details({ v }: { v: View }) {
+  const t = useT();
   const b = v.binding;
   const s = v.summary;
   if (v.kind === "trade") {
@@ -66,19 +70,18 @@ function Details({ v }: { v: View }) {
         ? <div className="connect-boundary mcp-warn"><AlertTriangle size={18} aria-hidden /><p>{box.text}</p></div>
         : <div className="connect-boundary"><ShieldCheck size={18} aria-hidden /><p>{box.text}</p></div>}
       <ul className="mcp-checks">
-        <li><label><span><strong>{text(s.action)}</strong><span>Token {short(b.token)} ({text(b.symbol)}) · chain {text(b.chain_id)}</span></span></label></li>
-        <li><label><span><strong>Quoted: expect / at least</strong><span>{text(s.expected_out)} / {text(s.min_out)} {b.side === "buy" ? String(b.symbol) : "USDG"} · your agent’s slippage limit when proposed {Number(b.slippage_bps) / 100}%</span></span></label></li>
-        {v.fresh_quote && <li><label><span><strong>Price right now</strong><span>{v.fresh_quote.quoted ? `expect ${text(v.fresh_quote.expected_out?.human)} · impact ${v.fresh_quote.price_impact_bps ?? "unknown"} bps${v.fresh_quote.impact_verdict.ok ? "" : ` · ${v.fresh_quote.impact_verdict.detail}`}` : `no quote: ${v.fresh_quote.why_not}`}</span></span></label></li>}
-        <li><label><span><strong>Your limits</strong><span>per trade {usdg(limits.per_trade_usdg)} · owner-order ceiling {ceiling === 0 ? "none" : usdg(ceiling)} · per day {usdg(limits.daily_usdg)}</span></span></label></li>
+        <li><label><span><strong>{text(s.action)}</strong><span>{t("connect.approveTokenLine", { token: short(b.token), symbol: text(b.symbol), chain: text(b.chain_id) })}</span></span></label></li>
+        <li><label><span><strong>{t("connect.approveQuoted")}</strong><span>{text(s.expected_out)} / {text(s.min_out)} {b.side === "buy" ? String(b.symbol) : "USDG"} · {t("connect.approveSlippage", { pct: Number(b.slippage_bps) / 100 })}</span></span></label></li>
+        {v.fresh_quote && <li><label><span><strong>{t("connect.approvePriceNow")}</strong><span>{v.fresh_quote.quoted ? `expect ${text(v.fresh_quote.expected_out?.human)} · impact ${v.fresh_quote.price_impact_bps ?? "unknown"} bps${v.fresh_quote.impact_verdict.ok ? "" : ` · ${v.fresh_quote.impact_verdict.detail}`}` : `no quote: ${v.fresh_quote.why_not}`}</span></span></label></li>}
+        <li><label><span><strong>{t("connect.approveLimitsTitle")}</strong><span>{t("connect.approveLimits", { perTrade: usdg(limits.per_trade_usdg), ceiling: ceiling === 0 ? t("connect.approveNoCeiling") : usdg(ceiling), daily: usdg(limits.daily_usdg) })}</span></span></label></li>
       </ul>
       <p className="mcp-note">
-        What approving checks, and what it does not: {b.side === "buy" ? "approving re-quotes this buy and refuses if the price has moved past the “at least” figure, or if your agent’s practice/live mode (as it last reported it) has changed. " : "approving refuses if your agent’s practice/live mode (as it last reported it) has changed. "}
-        After that, your agent takes a fresh price when it executes, with its own slippage limit at that moment, so the fill can differ from the figures above; and it trades in whatever mode it is in when it picks the order up. It also re-checks its limits and permission, and may still refuse. You can cancel from your assistant until the agent picks the order up.
+        {t("connect.approveChecksIntro")} {b.side === "buy" ? t("connect.approveChecksBuy") : t("connect.approveChecksSell")} {t("connect.approveChecksAfter")}
       </p>
     </>;
   }
   if (v.kind === "settings") {
-    if (v.settings_check) return <><SettingsRows c={v.settings_check} /><p className="mcp-note">These apply to your running agent as soon as you approve.</p></>;
+    if (v.settings_check) return <><SettingsRows c={v.settings_check} /><p className="mcp-note">{t("connect.approveSettingsApply")}</p></>;
     const diff = (s.diff as Array<{ label: string; current: string; proposed: string; help: string }>) ?? [];
     return <ul className="mcp-checks">{diff.map((d) => <li key={d.label}><label><span><strong>{d.label}: {d.current} → {d.proposed}</strong><span>{d.help}</span></span></label></li>)}</ul>;
   }
@@ -88,20 +91,35 @@ function Details({ v }: { v: View }) {
       const settings = (b.settings as Record<string, unknown>) ?? {};
       return <>
         <ul className="mcp-checks">{Object.entries(settings).map(([k, val]) => <li key={k}><label><span><strong>{k}</strong><span>{text(val)}</span></span></label></li>)}</ul>
-        {v.status === "awaiting_approval" && <p className="mcp-note">Your current settings could not be read just now. If you already run an agent, approving applies these to it immediately.</p>}
+        {v.status === "awaiting_approval" && <p className="mcp-note">{t("connect.approveSettingsUnread")}</p>}
       </>;
     }
     return <>
-      {c.applies_to_running_agent && <div className="connect-boundary mcp-warn"><AlertTriangle size={18} aria-hidden /><p><b>This changes your running agent.</b> Approving saves these settings and they apply to your agent immediately, including its trading limits below.</p></div>}
+      {c.applies_to_running_agent && <div className="connect-boundary mcp-warn"><AlertTriangle size={18} aria-hidden /><p><b>{t("connect.approveRunningTitle")}</b> {t("connect.approveRunningBody")}</p></div>}
       <SettingsRows c={c} />
-      {c.left_out.length > 0 && <p className="mcp-note">Left out of this draft: {c.left_out.join(", ")}. Safety floors such as the price-impact cap are only changed in Settings.</p>}
-      {!c.applies_to_running_agent && <p className="mcp-note">This saves settings only. Your agent cannot trade until you choose its limits and sign its trading permission yourself.</p>}
+      {c.left_out.length > 0 && <p className="mcp-note">{t("connect.approveLeftOut", { list: c.left_out.join(", ") })}</p>}
+      {!c.applies_to_running_agent && <p className="mcp-note">{t("connect.approveSaveOnly")}</p>}
     </>;
   }
   return <div className="connect-boundary"><p>“{text(b.text)}”</p></div>;
 }
 
+const NOUN_KEY: Record<View["kind"], MessageKey> = {
+  trade: "connect.approveNounTrade",
+  settings: "connect.approveNounSettings",
+  agent_draft: "connect.approveNounDraft",
+  post: "connect.approveNounPost",
+};
+
+const TITLE_KEY: Record<View["kind"], MessageKey> = {
+  trade: "connect.approveTitleTrade",
+  settings: "connect.approveTitleSettings",
+  agent_draft: "connect.approveTitleDraft",
+  post: "connect.approveTitlePost",
+};
+
 export function ApproveClient({ id }: { id: string }) {
+  const t = useT();
   const [v, setV] = useState<View | null>(null);
   const [signedOut, setSignedOut] = useState(false);
   const [loading, setLoading] = useState(true);
@@ -122,12 +140,12 @@ export function ApproveClient({ id }: { id: string }) {
       return next;
     } catch (e) {
       if (isSignedOut(e)) setSignedOut(true);
-      else setError(e instanceof Error ? e.message : "Could not load this request.");
+      else setError(e instanceof Error ? e.message : t("connect.consentLoadReq"));
       return null;
     } finally {
       setLoading(false);
     }
-  }, [id]);
+  }, [id, t]);
 
   useEffect(() => { void load(); return () => { if (poll.current) clearTimeout(poll.current); }; }, [load]);
 
@@ -147,7 +165,7 @@ export function ApproveClient({ id }: { id: string }) {
         setResuming(decision);
         setSignedOut(true);
       } else {
-        setError(e instanceof Error ? e.message : "Could not complete this.");
+        setError(e instanceof Error ? e.message : t("connect.approveDecideFail"));
         void load();
       }
     } finally {
@@ -162,54 +180,54 @@ export function ApproveClient({ id }: { id: string }) {
     const next = await load();
     const decision = resumeDecision(p, next, Date.now());
     if (decision && next) await decide(decision, next);
-    else if (p && next) setError(`Your ${p.decision === "approve" ? "approval" : "decline"} was not sent: this request is no longer waiting as it was when you pressed it. Review it again below.`);
+    else if (p && next) setError(t("connect.approveNotSent", { what: t(p.decision === "approve" ? "connect.approveNounApproval" : "connect.approveNounDecline") }));
   }
 
   const expired = v ? v.expires_at * 1000 < Date.now() : false;
   const deciding = v?.status === "awaiting_approval";
-  const noun = v?.kind === "trade" ? "Trade" : v?.kind === "settings" ? "Setting changes" : v?.kind === "agent_draft" ? "Agent setup" : v?.kind === "post" ? "Post" : "Request";
-  const title = v && !deciding ? `${noun}: ${headline(v).toLowerCase()}` : v?.kind === "trade" ? "Approve this trade?" : v?.kind === "settings" ? "Approve these setting changes?" : v?.kind === "agent_draft" ? "Approve this agent setup?" : v?.kind === "post" ? "Approve this post?" : "Review a request";
+  const noun: MessageKey = v ? (NOUN_KEY[v.kind] ?? "connect.approveNounRequest") : "connect.approveNounRequest";
+  const title = v && !deciding ? `${t(noun)}: ${headline(v).toLowerCase()}` : v ? t(TITLE_KEY[v.kind] ?? "connect.approveTitleGeneric") : t("connect.approveTitleGeneric");
 
   return (
     <div className="terminal-host partner-connect mcp-connect">
       <header className="connect-header">
         <BrandLockup />
-        <span className="connect-header-label"><ShieldCheck size={14} aria-hidden /> Approval</span>
+        <span className="connect-header-label"><ShieldCheck size={14} aria-hidden /> {t("connect.approveHeader")}</span>
       </header>
       <main className="connect-main">
         <div className="connect-context">
-          <span className="connect-eyebrow">PREPARED BY YOUR ASSISTANT</span>
-          <h1>{v && v.status !== "awaiting_approval" ? headline(v) : <>You decide.</>}</h1>
-          <p>Your AI assistant prepared this. Nothing happens unless you approve it here{v?.kind === "trade" ? ", and your agent’s own limits still apply after that" : ""}.</p>
-          {v && <div className="connect-app"><div><strong>Requested by {v.requested_by ?? "an AI assistant"}</strong><span>{fullDateTime(v.created_at * 1000)} · {v.status === "awaiting_approval" ? `expires ${fullDateTime(v.expires_at * 1000)}` : headline(v)}</span></div></div>}
+          <span className="connect-eyebrow">{t("connect.preparedEyebrow")}</span>
+          <h1>{v && v.status !== "awaiting_approval" ? headline(v) : <>{t("connect.approveYouDecide")}</>}</h1>
+          <p>{t("connect.approveIntro")}{v?.kind === "trade" ? t("connect.approveIntroTrade") : ""}.</p>
+          {v && <div className="connect-app"><div><strong>{t("connect.approveRequestedBy", { who: v.requested_by ?? t("connect.approveAiFallback") })}</strong><span>{fullDateTime(v.created_at * 1000)} · {v.status === "awaiting_approval" ? t("connect.approveExpires", { when: fullDateTime(v.expires_at * 1000) }) : headline(v)}</span></div></div>}
         </div>
         <section className="connect-panel" aria-busy={loading || busy}>
-          {loading && <div className="connect-wait" role="status"><span className="connect-spinner" aria-hidden />Loading…</div>}
+          {loading && <div className="connect-wait" role="status"><span className="connect-spinner" aria-hidden />{t("connect.loading")}</div>}
           {!loading && signedOut && <>
-            <h2>{resuming ? `Your session ended; sign in to finish ${resuming === "approve" ? "approving" : "declining"}.` : "Sign in as the agent’s owner."}</h2>
-            {resuming && <p className="mcp-note">Nothing was {resuming === "approve" ? "approved" : "declined"} yet. Once you are signed in as the agent’s owner, it is sent as you pressed it, if the request is still waiting unchanged.</p>}
+            <h2>{resuming ? t(resuming === "approve" ? "connect.approveResumeApprove" : "connect.approveResumeDecline") : t("connect.signinOwner")}</h2>
+            {resuming && <p className="mcp-note">{t("connect.approveResumeNote", { what: t(resuming === "approve" ? "connect.approveWasApproved" : "connect.approveWasDeclined") })}</p>}
             <SignIn onDone={() => void afterSignIn()} />
           </>}
           {!loading && v && <>
             <span className="connect-step-label">{v.kind.replace("_", " ").toUpperCase()}</span>
             <h2>{title}</h2>
-            {typeof v.summary.assistant_note === "string" && <p className="mcp-note">Assistant’s note (unverified): “{v.summary.assistant_note}”</p>}
-            {v.status === "cancelled" && v.result?.requester_withdrawn === true && typeof v.result.why === "string" && <div className="connect-boundary mcp-warn"><AlertTriangle size={18} aria-hidden /><p>Cancelled because {v.result.why}. Nothing was sent, and it can no longer be approved.</p></div>}
+            {typeof v.summary.assistant_note === "string" && <p className="mcp-note">{t("connect.approveAssistantNote", { note: v.summary.assistant_note })}</p>}
+            {v.status === "cancelled" && v.result?.requester_withdrawn === true && typeof v.result.why === "string" && <div className="connect-boundary mcp-warn"><AlertTriangle size={18} aria-hidden /><p>{t("connect.approveCancelled", { why: v.result.why })}</p></div>}
             <Details v={v} />
-            {v.result && <details open={TERMINAL.has(v.status)}><summary>Result</summary><pre className="mcp-activity">{JSON.stringify(v.result, null, 2)}</pre></details>}
+            {v.result && <details open={TERMINAL.has(v.status)}><summary>{t("connect.approveResult")}</summary><pre className="mcp-activity">{JSON.stringify(v.result, null, 2)}</pre></details>}
             {/* No decision is offered while signed out: pressing it could not be sent. */}
             {v.status === "awaiting_approval" && !expired && !signedOut && <>
               {/* A settings change whose "before" moved, or a trade whose book moved, is refused by the server; no button offers it. */}
-              {approvable(v) && <button className="flow-primary" disabled={busy} onClick={() => void decide("approve")}>{busy ? "Working…" : "Approve"} {!busy && <ArrowRight size={16} aria-hidden />}</button>}
-              <button className="connect-cancel" disabled={busy} onClick={() => void decide("reject")}><X size={15} aria-hidden /> Decline</button>
+              {approvable(v) && <button className="flow-primary" disabled={busy} onClick={() => void decide("approve")}>{busy ? t("connect.approveWorking") : t("connect.approveApprove")} {!busy && <ArrowRight size={16} aria-hidden />}</button>}
+              <button className="connect-cancel" disabled={busy} onClick={() => void decide("reject")}><X size={15} aria-hidden /> {t("connect.decline")}</button>
             </>}
-            {v.status === "awaiting_approval" && expired && <p className="mcp-note">This request expired. Ask your assistant for a fresh one.</p>}
+            {v.status === "awaiting_approval" && expired && <p className="mcp-note">{t("connect.approveExpired")}</p>}
             {v.status === "confirmed" && <div className="connect-success-icon"><Check size={25} aria-hidden /></div>}
           </>}
-          {error && <div className="connect-error" role="alert"><p>{error}</p><button onClick={() => void load()}>Reload</button></div>}
+          {error && <div className="connect-error" role="alert"><p>{error}</p><button onClick={() => void load()}>{t("connect.reload")}</button></div>}
         </section>
       </main>
-      <footer className="connect-footer">Manage what your assistants can do at <a href="/connect/apps">Connected apps</a>.</footer>
+      <footer className="connect-footer">{t("connect.manageFooterPre")} <a href="/connect/apps">{t("connect.appsLink")}</a>.</footer>
     </div>
   );
 }

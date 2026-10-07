@@ -1,6 +1,9 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { describe, it } from "node:test";
+import { EN } from "../../../lib/messages/en";
+
+const EN_TEXT = Object.values(EN).join("\n");
 
 /**
  * A FAILED READ MUST NOT BECOME A CLAIM ABOUT A COIN.
@@ -95,7 +98,9 @@ describe("a wave failure is reported once, not per coin", () => {
     // Computed ONCE at the top of the page and rendered above the grid, never
     // per card — the three on-chain reads fail as a wave, so thirty copies of
     // "unknown" would read as thirty broken coins instead of one bad read.
-    assert.match(PAGE, /const gap = disc \? chainGap\(disc\) : "";/);
+    // chainGap takes `t` now that the gap sentence renders through the
+    // catalogue; still computed once at the top and rendered above the grid.
+    assert.match(PAGE, /const gap = disc \? chainGap\(disc, t\) : "";/);
     assert.match(PAGE, /\{gap && <div className="mm-readfail">/);
   });
 
@@ -169,9 +174,13 @@ describe("a launchpad that could not be read is not reported as quiet", () => {
   });
 
   it("the page distinguishes unreadable from quiet, and checks the flag first", () => {
+    // i18n: the quiet sentence lives in the catalogue now; pin the key at the
+    // call site and the wording in EN.
     const unreadable = PAGE.indexOf("!disc.chain.launchpad");
-    const quiet = PAGE.indexOf("Nothing launched in the last few minutes");
+    const quiet = PAGE.indexOf('t("common.freshQuietTitle")');
     assert.ok(unreadable > 0, "the page must handle an unreadable launchpad");
+    assert.ok(quiet > 0, "the page must render the quiet-launchpad sentence");
     assert.ok(unreadable < quiet, "the unreadable case must be checked BEFORE the empty-list case");
+    assert.match(EN_TEXT, /Nothing launched in the last few minutes/, "the quiet-launchpad wording survives in EN");
   });
 });

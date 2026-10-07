@@ -24,6 +24,9 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { describe, it } from "node:test";
+import { EN } from "../lib/messages/en";
+
+const EN_TEXT = Object.values(EN).join("\n");
 
 const WALLET = readFileSync(new URL("./screens/Wallet.tsx", import.meta.url), "utf8");
 
@@ -80,7 +83,10 @@ describe("every sealable address is read, not merely declared", () => {
     assert.match(settings, /const body: unknown = await r\.json\(\)/);
     assert.match(settings, /!body\.values \|\| typeof body\.values !== "object" \|\| Array\.isArray\(body\.values\)/);
     assert.match(settings, /const v = body\.values as Record<string, unknown>/, "fields come from the validated fresh payload");
-    assert.match(settings, /throw new Error\("Could not refresh your trading settings/, "an unreadable payload must fail closed");
+    // i18n: the failure sentence lives in the catalogue now; pin the key at
+    // the call site and the wording in EN.
+    assert.match(settings, /t\("wallet\.errSettingsRefresh"\)/, "an unreadable payload must fail closed");
+    assert.match(EN_TEXT, /Could not refresh your trading settings/, "the fail-closed wording survives in EN");
 
     const freshVariables = {
       v4AdapterAddress: "freshAdapter",

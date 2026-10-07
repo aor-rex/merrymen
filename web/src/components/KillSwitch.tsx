@@ -2,6 +2,7 @@
 
 import { useState } from "react";
 import { clearGrant } from "@/lib/session";
+import { useT } from "@/lib/i18n";
 
 /**
  * The kill switch — trust artifact #1. Two-step arm/confirm so a stray click
@@ -13,6 +14,7 @@ import { clearGrant } from "@/lib/session";
  * revocation ships with the funded-account flow.
  */
 export function KillSwitch() {
+  const t = useT();
   const [arming, setArming] = useState(false);
   const [state, setState] = useState<"idle" | "killing" | "done" | "kept">("idle");
   const [kept, setKept] = useState("");
@@ -27,7 +29,7 @@ export function KillSwitch() {
       // "all agents killed" would be untrue, and the owner has to act.
       if (res.status === 409) {
         const body = (await res.json().catch(() => null)) as { error?: string } | null;
-        setKept(body?.error ?? "The grant was not deleted, because the owner key could not be archived first.");
+        setKept(body?.error ?? t("common.killKeptDefault"));
         setState("kept");
         return;
       }
@@ -45,7 +47,7 @@ export function KillSwitch() {
     return (
       <>
         <button className="killall" onClick={() => void kill()}>
-          ◉ try the kill again
+          {t("common.killRetry")}
         </button>
         <div className="killall-note" role="alert">
           {kept}
@@ -58,13 +60,12 @@ export function KillSwitch() {
     return (
       <>
         <button className="killall" disabled>
-          ✓ all agents killed
+          {t("common.killDone")}
         </button>
         {/* Says what actually happened to the money, because the previous
             wording implied the wallet was gone and the truth is the opposite. */}
         <div className="killall-note">
-          grant revoked · worker halts on its next tick · your recovery key is kept, so you
-          can still withdraw
+          {t("common.killDoneNote")}
         </div>
       </>
     );
@@ -84,12 +85,10 @@ export function KillSwitch() {
           void kill();
         }}
       >
-        {state === "killing" ? "killing…" : arming ? "◉ press again to confirm" : "◉ kill all agents"}
+        {state === "killing" ? t("common.killing") : arming ? t("common.killConfirm") : t("common.killAll")}
       </button>
       <div className="killall-note">
-        {arming
-          ? "destroys the grant + session key · worker halts on its next tick"
-          : "revokes every session key · positions untouched"}
+        {arming ? t("common.killNoteArming") : t("common.killNoteIdle")}
       </div>
     </>
   );

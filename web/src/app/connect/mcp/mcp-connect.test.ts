@@ -10,6 +10,9 @@ import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { installLinks } from "@/mcp/install-links";
 import { McpConnectClient, connectedSummary, lastUsedWords } from "./McpConnectClient";
+import { EN } from "../../../lib/messages/en";
+
+const EN_TEXT = Object.values(EN).join("\n");
 
 // See wire-ring.test.ts: tsx compiles `.tsx` against a global React.
 (globalThis as unknown as { React: typeof React }).React = React;
@@ -156,8 +159,11 @@ test("the terminal's ways in: the profile row, the desktop account menu, and Con
   const you = source("../../../terminal/screens/You.tsx");
   const desktop = source("../../../terminal/Desktop.tsx");
   const apps = source("../apps/AppsClient.tsx");
-  assert.ok(you.includes("<strong>Connect to Claude</strong>") && you.includes("href={CONNECT_ASSISTANT_HREF}"));
-  assert.ok(desktop.includes("<Link href={CONNECT_ASSISTANT_HREF}>Connect to Claude</Link>"));
+  // i18n: the label lives in the catalogue now; pin the key at each call
+  // site and the wording in EN.
+  assert.ok(you.includes('t("you.connectClaude")') && you.includes("href={CONNECT_ASSISTANT_HREF}"));
+  assert.ok(desktop.includes('t("you.connectClaude")') && desktop.includes("href={CONNECT_ASSISTANT_HREF}"));
+  assert.match(EN_TEXT, /Connect to Claude/, "the connect label survives in EN");
   assert.ok(apps.includes("installLinks(listing.endpoint).claude") && apps.includes(`href="/connect/mcp">Other assistants`));
   assert.match(source("../../../terminal/assistant-connect.ts"), /CONNECT_ASSISTANT_HREF = "\/connect\/mcp"/);
 });

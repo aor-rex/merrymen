@@ -1,4 +1,5 @@
 import { useEffect, useId, useRef, useState } from "react";
+import { useT } from "@/lib/i18n";
 import { createPortal } from "react-dom";
 
 type CardState = { kind: "loading" } | { kind: "error"; message: string } | { kind: "image"; url: string };
@@ -12,6 +13,7 @@ export function PnlCardDialog({ tradeId, symbol, onClose }: {
   const dialog = useRef<HTMLDialogElement>(null);
   const titleId = useId();
   const noteId = useId();
+  const t = useT();
   const [attempt, setAttempt] = useState(0);
   const [state, setState] = useState<CardState>({ kind: "loading" });
   const [loaded, setLoaded] = useState(false);
@@ -41,13 +43,13 @@ export function PnlCardDialog({ tradeId, symbol, onClose }: {
         });
         if (!response.ok) {
           throw new Error(response.status === 401 || response.status === 403 || response.status === 404
-            ? "This trade is no longer available in this account. Close this window and refresh your trades."
+            ? t("common.pnlGone")
             : response.status === 409
-              ? "A verified P&L image is not available for this trade."
-              : "The image could not be generated. Please try again.");
+              ? t("common.pnlNoImage")
+              : t("common.pnlGenFailed"));
         }
         if (response.headers.get("content-type")?.split(";")[0]?.trim() !== "image/png") {
-          throw new Error("The image could not be loaded. Please try again.");
+          throw new Error(t("common.pnlLoadFailed"));
         }
         const blob = await response.blob();
         if (disposed) return;
@@ -56,8 +58,8 @@ export function PnlCardDialog({ tradeId, symbol, onClose }: {
       } catch (error) {
         if (disposed) return;
         setState({ kind: "error", message: timedOut
-          ? "The image took too long to load. Please try again."
-          : error instanceof Error && error.name !== "TypeError" ? error.message : "The image could not be loaded. Check your connection and try again." });
+          ? t("common.pnlTooLong")
+          : error instanceof Error && error.name !== "TypeError" ? error.message : t("common.pnlConnFailed") });
       } finally {
         clearTimeout(timeout);
       }
@@ -76,25 +78,25 @@ export function PnlCardDialog({ tradeId, symbol, onClose }: {
       <dialog ref={dialog} className="pnl-card-dialog" aria-labelledby={titleId} aria-describedby={noteId}
         onCancel={(event) => { event.preventDefault(); onClose(); }}>
         <header className="pnl-card-toolbar">
-          <h2 id={titleId}>{symbol} P&amp;L image</h2>
-          <button type="button" onClick={onClose}>Close</button>
+          <h2 id={titleId}>{t("common.pnlTitle", { symbol })}</h2>
+          <button type="button" onClick={onClose}>{t("common.pnlClose")}</button>
         </header>
-        <p id={noteId} className="pnl-card-note">Realized P&amp;L for this sell, in USDG. A partial sell shows only the portion sold.</p>
-        {state.kind === "loading" && <p className="pnl-card-status" role="status">Creating your image…</p>}
+        <p id={noteId} className="pnl-card-note">{t("common.pnlNote")}</p>
+        {state.kind === "loading" && <p className="pnl-card-status" role="status">{t("common.pnlCreating")}</p>}
         {state.kind === "error" && <div className="pnl-card-status" role="alert">
           <p>{state.message}</p>
-          <button type="button" onClick={() => setAttempt((value) => value + 1)}>Try again</button>
+          <button type="button" onClick={() => setAttempt((value) => value + 1)}>{t("common.tryAgain")}</button>
         </div>}
         {state.kind === "image" && <>
           {/* The renderer returns authenticated PNG bytes, not a public image URL. */}
           {/* eslint-disable-next-line @next/next/no-img-element */}
           <img className="pnl-card-image" src={state.url} width={1280} height={853}
-            alt={`${symbol} realized profit and loss card, with invested amount, sale proceeds and P&L in USDG`}
+            alt={t("common.pnlAlt", { symbol })}
             onLoad={() => setLoaded(true)}
-            onError={() => setState({ kind: "error", message: "The image could not be displayed. Please try again." })} />
+            onError={() => setState({ kind: "error", message: t("common.pnlDisplayFailed") })} />
           <div className="pnl-card-actions">
-            {loaded ? <a href={state.url} download={filename}>Download PNG</a> : <span role="status">Loading preview…</span>}
-            <button type="button" disabled={!loaded} onClick={() => window.print()}>Print</button>
+            {loaded ? <a href={state.url} download={filename}>{t("common.pnlDownload")}</a> : <span role="status">{t("common.pnlPreview")}</span>}
+            <button type="button" disabled={!loaded} onClick={() => window.print()}>{t("common.pnlPrint")}</button>
           </div>
         </>}
       </dialog>

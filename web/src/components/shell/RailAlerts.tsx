@@ -9,6 +9,7 @@ import type { PublicThesis } from "@/lib/thesis";
 import { usdAdaptive } from "@/lib/format";
 import { sayOf } from "@/lib/post-line";
 import { alertsOf, alertsRead, coinName, emptyAlerts, type AlertsRead } from "@/lib/rail-alerts";
+import { useT } from "@/lib/i18n";
 
 /**
  * WHAT THE AGENTS ARE DOING RIGHT NOW, down the side of every page.
@@ -42,6 +43,7 @@ function badgeClass(kind: ReturnType<typeof badgeOf>["kind"]): string {
 }
 
 export function RailAlerts() {
+  const t = useT();
   const [theses, setTheses] = useState<PublicThesis[] | null>(null);
   const [read, setRead] = useState<AlertsRead>("partial");
 
@@ -79,7 +81,7 @@ export function RailAlerts() {
   if (!theses) {
     return (
       <div className="mm-alerts">
-        <p className="mm-kicker">Alerts</p>
+        <p className="mm-kicker">{t("shell.alerts")}</p>
         {[0, 1, 2, 3, 4].map((i) => (
           <div key={i} className="mm-alert skel" />
         ))}
@@ -92,7 +94,7 @@ export function RailAlerts() {
     // published trade, the latest posts read with none, and no read at all.
     return (
       <div className="mm-alerts">
-        <p className="mm-kicker">Alerts</p>
+        <p className="mm-kicker">{t("shell.alerts")}</p>
         <p className="mm-kicker" role="status">{emptyAlerts(read)}</p>
       </div>
     );
@@ -100,7 +102,7 @@ export function RailAlerts() {
 
   return (
     <div className="mm-alerts">
-      <p className="mm-kicker">Alerts</p>
+      <p className="mm-kicker">{t("shell.alerts")}</p>
       <ul>
         {theses.map((t, i) => (
           <li key={`${t.slug ?? t.name}:${t.at}:${i}`} className="mm-alert">
@@ -118,6 +120,7 @@ export function RailAlerts() {
  * checked.
  */
 export function AlertRow({ t }: { t: PublicThesis }) {
+  const tr = useT();
   const b = badgeOf(t);
   const size = money(t.sizeUsdg);
   const coin = coinName(t);
@@ -138,7 +141,7 @@ export function AlertRow({ t }: { t: PublicThesis }) {
         <span className="did mono">
           {coin && <b title={coin.id ?? undefined}>{coin.shown}</b>}
           {size && <span className="amt">{size}</span>}
-          {t.paper && <span className="pp">paper</span>}
+          {t.paper && <span className="pp">{tr("common.paper")}</span>}
         </span>
       )}
       {/* THE LINE NOBODY ELSE'S TAPE HAS. One clause of the reasoning — or the
@@ -155,7 +158,7 @@ export function AlertRow({ t }: { t: PublicThesis }) {
           out of the markup that was written. */}
       {why && (
         <details className="mm-alert-why">
-          <summary>why</summary>
+          <summary>{tr("common.whyLower")}</summary>
           <span>{why}</span>
         </details>
       )}

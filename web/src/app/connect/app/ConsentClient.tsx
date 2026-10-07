@@ -14,6 +14,7 @@ import { AlertTriangle, ArrowRight, Bot, Check, ChevronDown, Cpu, Laptop, Shield
 import { SignIn } from "@/terminal/HostedControls";
 import { BrandLockup } from "../BrandLockup";
 import { accessSummary, initialSelection, previousNote, type Selection } from "./summary";
+import { useT, useRichT } from "@/lib/i18n";
 
 const STORAGE = "merrymen.mcp-consent";
 
@@ -54,10 +55,10 @@ async function consent<T>(body: Record<string, unknown>): Promise<T> {
       signal: AbortSignal.timeout(30_000),
     });
   } catch {
-    throw new Error("Merrymen took too long to answer. Check your connection and try again.");
+    throw new Error("CONSENT_SLOW");
   }
   const data = await response.json().catch(() => ({}));
-  if (!response.ok) throw new Error(typeof data.error_description === "string" ? data.error_description : `Could not load this request (${response.status}).`);
+  if (!response.ok) throw new Error(typeof data.error_description === "string" ? data.error_description : `CONSENT_LOAD:${response.status}`);
   return data as T;
 }
 
@@ -76,7 +77,18 @@ export function scopeBadge(s: Pick<ScopeView, "id" | "level">): string {
   return SCOPE_BADGE[s.id] ?? LEVEL_LABEL[s.level];
 }
 
+// The request helpers run outside the component, so failures arrive as
+// sentinels; server refusals pass through verbatim.
+function cxlate(t: ReturnType<typeof useT>, message: string): string {
+  if (message === "CONSENT_SLOW") return t("connect.consentSlow");
+  const load = /^CONSENT_LOAD:(\d+)$/.exec(message);
+  if (load) return t("connect.consentLoad", { status: load[1]! });
+  return message;
+}
+
 export function ConsentClient() {
+  const t = useT();
+  const rt = useRichT();
   const [request, setRequest] = useState<string | null>(null);
   const [view, setView] = useState<ConsentView | null>(null);
   const [scopes, setScopes] = useState<Set<string>>(new Set());
@@ -103,7 +115,7 @@ export function ConsentClient() {
     } catch { /* tab storage is optional */ }
     if (!value || value.length > 200) {
       setLoading(false);
-      setError("Start the connection from your AI assistant (for example “Add connector” in Claude, or `codex mcp login merrymen`). This page opens by itself.");
+      setError(t("connect.consentStart"));
       return;
     }
     setRequest(value);
@@ -126,11 +138,11 @@ export function ConsentClient() {
       setScopes(new Set(initial.scopes));
       setAgents(new Set(initial.agents));
     } catch (cause) {
-      if (v === version.current) setError(cause instanceof Error ? cause.message : "Could not load this request.");
+      if (v === version.current) setError(cause instanceof Error ? cxlate(t, cause.message) : t("connect.consentLoadReq"));
     } finally {
       if (v === version.current) setLoading(false);
     }
-  }, [request]);
+  }, [request, t]);
 
   useEffect(() => { if (request) void load(); }, [request, load]);
 
@@ -144,7 +156,7 @@ export function ConsentClient() {
       setDone(approve ? "approved" : "declined");
       window.location.assign(out.redirect);
     } catch (cause) {
-      setError(cause instanceof Error ? cause.message : "Could not complete this. Try again.");
+      setError(cause instanceof Error ? cxlate(t, cause.message) : t("connect.consentDone"));
     } finally {
       setBusy(false);
     }
@@ -156,7 +168,7 @@ export function ConsentClient() {
     update(next);
   };
 
-  const appName = view?.client.name ?? view?.client.host ?? "An AI assistant";
+  const appName = view?.client.name ?? view?.client.host ?? t("connect.appFallbackAi");
   const noAgent = !!view && view.signedIn && view.agents.length === 0;
   // The server never offers offline_access (it controls nothing: every
   // connection can refresh until it is disconnected or reaches its limit).
@@ -172,64 +184,64 @@ export function ConsentClient() {
     <div className="terminal-host partner-connect mcp-connect">
       <header className="connect-header">
         <BrandLockup />
-        <span className="connect-header-label"><ShieldCheck size={14} aria-hidden /> AI assistant connection</span>
+        <span className="connect-header-label"><ShieldCheck size={14} aria-hidden /> {t("connect.consentHeader")}</span>
       </header>
       <main className="connect-main">
         <div className="connect-context">
-          <span className="connect-eyebrow">YOUR AGENT, IN YOUR ASSISTANT</span>
-          <h1>{done === "approved" ? "Connected." : done === "declined" ? "Declined." : <>Connect your<br />assistant.</>}</h1>
-          <p>{done ? "Returning you to your assistant…" : "Review who is asking and what they could do. You can change your mind at any time on the Connected apps page."}</p>
+          <span className="connect-eyebrow">{t("connect.consentEyebrow")}</span>
+          <h1>{done === "approved" ? t("connect.doneApproved") : done === "declined" ? t("connect.doneDeclined") : <>{t("connect.connectA")}<br />{t("connect.connectB")}</>}</h1>
+          <p>{done ? t("connect.returning") : t("connect.consentIntro")}</p>
           {view && (
             <div className="connect-app">
               <span className="connect-app-icon">{view.client.local ? <Laptop size={20} aria-hidden /> : <Cpu size={20} aria-hidden />}</span>
               <div>
                 <strong>{appName}</strong>
-                <span>{view.client.registration === "metadata-document" ? `Verified at ${view.client.host}` : `Registered app — not verified by Merrymen`}</span>
-                <span>Returns to <b className="mcp-host">{view.client.redirectHost}</b>{view.client.local ? " (a program on this computer)" : ""}</span>
+                <span>{view.client.registration === "metadata-document" ? t("connect.verifiedAt", { host: view.client.host }) : t("connect.unverified")}</span>
+                <span>{t("connect.returnsTo")} <b className="mcp-host">{view.client.redirectHost}</b>{view.client.local ? t("connect.localNote") : ""}</span>
               </div>
             </div>
           )}
         </div>
 
         <section className="connect-panel" aria-label="Approve access" aria-busy={loading || busy}>
-          {loading && <div className="connect-wait" role="status"><span className="connect-spinner" aria-hidden />Checking the request…</div>}
+          {loading && <div className="connect-wait" role="status"><span className="connect-spinner" aria-hidden />{t("connect.consentChecking")}</div>}
 
           {!loading && view && !view.signedIn && <>
-            <span className="connect-step-label">01 · SIGN IN</span>
-            <h2>Sign in to Merrymen.</h2>
-            <p>{appName} wants to connect to your Merrymen. Sign in first; you will review exactly what it could do before anything is shared.</p>
+            <span className="connect-step-label">{t("connect.s1")}</span>
+            <h2>{t("connect.consentSigninTitle")}</h2>
+            <p>{t("connect.consentSigninBody", { app: appName })}</p>
             <SignIn onDone={() => void load()} />
           </>}
 
           {!loading && view && view.signedIn && !done && <>
-            <span className="connect-step-label">02 · ALLOW ACCESS</span>
-            <h2>Allow {appName} to use your Merryman?</h2>
-            {view.client.registration === "dynamic" && <div className="connect-boundary mcp-warn"><AlertTriangle size={18} aria-hidden /><p>Merrymen cannot confirm who made this app. Only continue if you just started this connection yourself and recognise <b>{view.client.redirectHost}</b>.</p></div>}
+            <span className="connect-step-label">{t("connect.consentS2")}</span>
+            <h2>{t("connect.consentAllowTitle", { app: appName })}</h2>
+            {view.client.registration === "dynamic" && <div className="connect-boundary mcp-warn"><AlertTriangle size={18} aria-hidden /><p>{rt("connect.unverifiedWarn", { host: view.client.redirectHost })}</p></div>}
 
             {/* One agent (every owner, today) is a card with a Share box, ticked
                 at the start like the old checkbox list; the permissions below
                 say what the app may do with it. */}
             {noAgent
-              ? <p className="mcp-note">You don’t have an agent yet, so there is no agent to share. You can reconnect after creating one.</p>
+              ? <p className="mcp-note">{t("connect.consentNoAgent")}</p>
               : onlyAgent
                 ? <div className="mcp-agent-card">
                   <span className="mcp-agent-card-icon"><Bot size={19} aria-hidden /></span>
                   <div>
-                    <strong>{onlyAgent.name || "Your agent"}</strong>
-                    <span>Agent {onlyAgent.slug}</span>
-                    <span>{onlyAgent.account ? `Account ${shortAccount(onlyAgent.account)}` : "No trading permission signed yet"}</span>
+                    <strong>{onlyAgent.name || t("connect.yourAgent")}</strong>
+                    <span>{t("connect.agentSlug", { slug: onlyAgent.slug })}</span>
+                    <span>{onlyAgent.account ? t("connect.acctOf", { x: shortAccount(onlyAgent.account) }) : t("connect.noPerm")}</span>
                   </div>
                   {/* Still the owner's choice: unticked, only permissions that need no agent are shared. */}
                   <label className="mcp-agent-card-share">
                     <input type="checkbox" checked={agents.has(onlyAgent.slug)} onChange={() => toggle(agents, onlyAgent.slug, setAgents)} />
-                    Share this agent with {appName}
+                    {t("connect.shareWith", { app: appName })}
                   </label>
                 </div>
                 : <>
-                  <h3 className="mcp-subhead">Agents it can see</h3>
+                  <h3 className="mcp-subhead">{t("connect.agentsHead")}</h3>
                   <ul className="mcp-checks">{view.agents.map((a) => (
                     <li key={a.slug}><label><input type="checkbox" checked={agents.has(a.slug)} onChange={() => toggle(agents, a.slug, setAgents)} />
-                      <span><strong>Agent {a.slug}</strong><span>{a.account ? `Account ${shortAccount(a.account)}` : "No trading permission signed yet"}</span></span></label></li>))}</ul>
+                      <span><strong>{t("connect.agentSlug", { slug: a.slug })}</strong><span>{a.account ? t("connect.acctOf", { x: shortAccount(a.account) }) : t("connect.noPerm")}</span></span></label></li>))}</ul>
                 </>}
 
             <div className="mcp-summary">
@@ -237,19 +249,19 @@ export function ConsentClient() {
                 {summary.map((g) => (
                   <li key={g.level} className={`mcp-summary-${g.level}`}><Check size={16} aria-hidden /><p><strong>{g.label}</strong> <span>{g.text}</span></p></li>
                 ))}
-                <li className="mcp-summary-never"><X size={16} aria-hidden /><p><strong>Never</strong> <span>move your funds, see your keys, turn on live trading or loosen your signed limits.</span></p></li>
+                <li className="mcp-summary-never"><X size={16} aria-hidden /><p><strong>{t("connect.never")}</strong> <span>{t("connect.neverBody")}</span></p></li>
               </ul>
               {summary.length === 0 && <p className="mcp-summary-note">{!noAgent && agents.size === 0 && visibleScopes.some((s) => s.needsAgent && scopes.has(s.id))
-                ? <>Nothing would be shared: what’s ticked needs your agent. Share your agent, or choose something else under “Change what {appName} can do”.</>
-                : <>Nothing is ticked yet. Choose at least one thing under “Change what {appName} can do”.</>}</p>}
+                ? <>{t("connect.nothingShare", { toggle: t("connect.changeWhat", { app: appName }) })}</>
+                : <>{t("connect.nothingTicked", { toggle: t("connect.changeWhat", { app: appName }) })}</>}</p>}
               {note && <p className="mcp-summary-note">{note}</p>}
             </div>
 
-            <button className="flow-primary" disabled={busy || !chosenUseful} onClick={() => void decide(true)}>{busy ? "Connecting…" : `Allow ${appName}`} {!busy && <ArrowRight size={16} aria-hidden />}</button>
-            <button className="connect-cancel" disabled={busy} onClick={() => void decide(false)}><Unplug size={15} aria-hidden /> Decline</button>
+            <button className="flow-primary" disabled={busy || !chosenUseful} onClick={() => void decide(true)}>{busy ? t("connect.connecting") : t("connect.allowBtn", { app: appName })} {!busy && <ArrowRight size={16} aria-hidden />}</button>
+            <button className="connect-cancel" disabled={busy} onClick={() => void decide(false)}><Unplug size={15} aria-hidden /> {t("connect.decline")}</button>
 
             <button type="button" className="mcp-customize-toggle" aria-expanded={customizing} aria-controls="mcp-customize" onClick={() => setCustomizing((open) => !open)}>
-              Change what {appName} can do <ChevronDown size={15} aria-hidden />
+              {t("connect.changeWhat", { app: appName })} <ChevronDown size={15} aria-hidden />
             </button>
             <div id="mcp-customize" className="mcp-customize" hidden={!customizing}>
               <ul className="mcp-checks">{visibleScopes.map((s) => {
@@ -266,20 +278,21 @@ export function ConsentClient() {
             </div>
 
             <div className="connect-boundary"><ShieldCheck size={19} aria-hidden /><p>
-              Disconnect it any time on <a href="/connect/apps">Connected apps</a>; that ends its access at once and cancels anything waiting for your approval.{view.maxDays ? ` You’ll be asked again within ${view.maxDays} days.` : ""}
+              {t("connect.boundaryPre")} <a href="/connect/apps">{t("connect.appsLink")}</a>
+              {t("connect.boundaryPost")}{view.maxDays ? <>{" "}{t("connect.reask", { days: view.maxDays })}</> : ""}
             </p></div>
           </>}
 
-          {done && <><div className="connect-success-icon"><Check size={25} aria-hidden /></div><h2>{done === "approved" ? `Back to ${appName}.` : "Nothing was shared."}</h2><p>If your assistant doesn’t open, switch back to it yourself.</p></>}
+          {done && <><div className="connect-success-icon"><Check size={25} aria-hidden /></div><h2>{done === "approved" ? t("connect.backTitle", { app: appName }) : t("connect.doneNothing")}</h2><p>{t("connect.doneHint")}</p></>}
 
-          {error && <div className="connect-error" role="alert"><p>{error}</p>{request && <button disabled={loading || busy} onClick={() => void load()}>Try again</button>}</div>}
+          {error && <div className="connect-error" role="alert"><p>{error}</p>{request && <button disabled={loading || busy} onClick={() => void load()}>{t("connect.tryAgain")}</button>}</div>}
         </section>
       </main>
       <footer className="connect-footer">
-        Merrymen stays the source of truth. Assistants only get the access you choose here.{" "}
-        <a href="https://merrymen.dev/privacy" target="_blank" rel="noopener noreferrer">Privacy policy</a>
+        {t("connect.consentFooter")}{" "}
+        <a href="https://merrymen.dev/privacy" target="_blank" rel="noopener noreferrer">{t("connect.privacy")}</a>
         {" · "}
-        <a href="https://merrymen.dev/terms" target="_blank" rel="noopener noreferrer">Terms</a>
+        <a href="https://merrymen.dev/terms" target="_blank" rel="noopener noreferrer">{t("connect.terms")}</a>
       </footer>
     </div>
   );

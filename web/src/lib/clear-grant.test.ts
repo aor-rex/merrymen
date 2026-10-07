@@ -1,6 +1,9 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { readFileSync } from "node:fs";
+import { EN } from "./messages/en";
+
+const EN_TEXT = Object.values(EN).join("\n");
 
 /**
  * KILLING AN AGENT MUST NOT DESTROY THE ONLY COPY OF THE OWNER KEY.
@@ -108,7 +111,10 @@ test("the kill switch does not tell the user their wallet is gone", () => {
     /destroy the local key/,
     "the kill path must no longer describe itself as destroying the key",
   );
-  assert.match(kill, /recovery key is kept/, "and must say the money is still reachable");
+  // i18n: the sentence lives in the catalogue now; pin the key at the call
+  // site and the wording in EN.
+  assert.match(kill, /t\("common\.killDoneNote"\)/);
+  assert.match(EN_TEXT, /recovery key is kept/, "and must say the money is still reachable");
 });
 
 test("AN ABSENT KEY IS NOT AN UNREADABLE KEY — the screens tell each truth", () => {
@@ -132,17 +138,22 @@ test("AN ABSENT KEY IS NOT AN UNREADABLE KEY — the screens tell each truth", (
   // The unreadable-key warning may still exist — it is correct for a legacy
   // grant — but it must be unreachable for a privy-owned one.
   // Anchored on the row itself, not the first mention of the phrase.
-  const rowAt = wallet.indexOf("<span className=\"rk\">owner key</span>");
+  // i18n: the row label and the warning live in the catalogue now; pin the
+  // keys at the call site and the wording in EN.
+  const rowAt = wallet.indexOf('t("wallet.ownerKeyRow")');
   assert.notEqual(rowAt, -1, "the owner-key row must exist");
   const keyRow = wallet.slice(rowAt, rowAt + 1800);
   assert.ok(
-    keyRow.indexOf("isPrivyOwned(grant)") < keyRow.indexOf("couldn't read your owner key"),
+    keyRow.indexOf("isPrivyOwned(grant)") < keyRow.indexOf('t("wallet.keyUnreadable")'),
     "the privy branch must be taken BEFORE the unreadable-key fallback",
   );
+  assert.match(EN_TEXT, /couldn't read your owner key/, "the legacy unreadable-key warning survives in EN");
 
   // And the privy backup step must not ask somebody to confirm they saved
   // something that does not exist.
   const privyStep = create.slice(create.indexOf("isPrivyOwned(grant)"), create.indexOf("!isPrivyOwned(grant)"));
-  assert.ok(!/saved my recovery key/.test(privyStep), "nothing was shown, so nothing can be saved");
-  assert.match(privyStep, /merrymen cannot recover these funds/, "the real trade-off must be stated instead");
+  assert.ok(!/t\("onboard\.keyAck"\)/.test(privyStep), "nothing was shown, so nothing can be saved");
+  assert.match(EN_TEXT, /saved my recovery key/, "the legacy backup confirmation survives in EN");
+  assert.match(privyStep, /t\("onboard\.privyAck"\)/, "the real trade-off must be stated instead");
+  assert.match(EN_TEXT, /merrymen cannot recover these funds/, "the real trade-off wording survives in EN");
 });

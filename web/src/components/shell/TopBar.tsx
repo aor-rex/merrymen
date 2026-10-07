@@ -5,6 +5,7 @@ import Link from "next/link";
 import { useRouter } from "next/navigation";
 import type { SearchHit } from "@/app/api/search/route";
 import { usd } from "@/lib/format";
+import { useT } from "@/lib/i18n";
 
 /**
  * THE BAR ACROSS THE TOP: find something, and see where you stand.
@@ -37,6 +38,7 @@ interface Mine {
 
 export function TopBar() {
   const router = useRouter();
+  const t = useT();
   const [q, setQ] = useState("");
   const [hits, setHits] = useState<SearchHit[]>([]);
   const [open, setOpen] = useState(false);
@@ -133,7 +135,7 @@ export function TopBar() {
           onKeyDown={(e) => {
             if (e.key === "Enter" && hits[0]) go(hits[0].href);
           }}
-          placeholder="Search agents or tokens…"
+          placeholder={t("common.searchPlaceholder")}
           aria-label="Search agents or tokens"
           spellCheck={false}
         />
@@ -142,11 +144,11 @@ export function TopBar() {
         {open && q.trim().length >= 2 && (
           <div className="mm-search-pop">
             {hits.length === 0 ? (
-              <p className="none">Nothing matches that.</p>
+              <p className="none">{t("common.searchNone")}</p>
             ) : (
               hits.map((h) => (
                 <button key={h.href} type="button" onClick={() => go(h.href)}>
-                  <span className={`kind ${h.kind}`}>{h.kind === "agent" ? "agent" : "token"}</span>
+                  <span className={`kind ${h.kind}`}>{h.kind === "agent" ? t("common.searchKindAgent") : t("common.searchKindToken")}</span>
                   <span className="t">{h.title}</span>
                   {h.sub && <span className="s mono">{h.sub}</span>}
                 </button>
@@ -161,16 +163,16 @@ export function TopBar() {
           <Link href="/you" className="mm-mine-book">
             <span>
               <b className="mono">{money(mine.cash)}</b>
-              <i>cash</i>
+              <i>{t("common.cash")}</i>
             </span>
             <span>
               <b className="mono">{money(mine.equity)}</b>
-              <i>on the book</i>
+              <i>{t("common.onTheBook")}</i>
             </span>
           </Link>
         ) : mine ? (
           <Link href="/grant" className="mm-btn primary sm">
-            Deploy an agent
+            {t("common.deployAgent")}
           </Link>
         ) : null}
       </div>

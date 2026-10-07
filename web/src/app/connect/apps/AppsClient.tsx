@@ -10,6 +10,7 @@ import { KeyRound, Plug, ShieldCheck, Unplug } from "lucide-react";
 import { fullDateTime } from "@/lib/format";
 import { SignIn } from "@/terminal/HostedControls";
 import { installLinks } from "@/mcp/install-links";
+import { useT } from "@/lib/i18n";
 import { BrandLockup } from "../BrandLockup";
 
 interface ScopeTag { id: string; title: string; level: string }
@@ -29,8 +30,6 @@ interface Connection {
 }
 interface AvailableScope { id: string; title: string; detail: string; level: string; needsAgent: boolean }
 interface Listing { endpoint: string; connections: Connection[]; agents: Array<{ slug: string; account: string | null }>; available_scopes: AvailableScope[] }
-
-const when = (sec: number | null) => sec ? fullDateTime(sec * 1000) : "never";
 
 /** What the owner reads when their session ended mid-action: never a bare status word. */
 export const SESSION_ENDED = "Your session ended; sign in to finish.";
@@ -76,6 +75,7 @@ export function resumePlan(p: PendingAction | null, before: Pick<Listing, "agent
 }
 
 export function AppsClient() {
+  const t = useT();
   const [listing, setListing] = useState<Listing | null>(null);
   const [signedOut, setSignedOut] = useState(false);
   const [loading, setLoading] = useState(true);
@@ -91,6 +91,8 @@ export function AppsClient() {
   const pendingRef = useRef<{ action: PendingAction; before: Listing | null } | null>(null);
   const [pending, setPending] = useState<PendingAction | null>(null);
 
+  const when = (sec: number | null) => sec ? fullDateTime(sec * 1000) : t("connect.appsNever");
+
   const load = useCallback(async (): Promise<Listing | null> => {
     setLoading(true);
     setError("");
@@ -101,12 +103,12 @@ export function AppsClient() {
       return next;
     } catch (e) {
       if (isSignedOut(e)) setSignedOut(true);
-      else setError(e instanceof Error ? e.message : "Could not load your connections.");
+      else setError(e instanceof Error ? e.message : t("connect.appsLoadFail"));
       return null;
     } finally {
       setLoading(false);
     }
-  }, []);
+  }, [t]);
 
   useEffect(() => { void load(); }, [load]);
 
@@ -127,7 +129,7 @@ export function AppsClient() {
       await load();
     } catch (e) {
       if (isSignedOut(e)) pause({ kind: "revoke", id, name });
-      else setError(e instanceof Error ? e.message : "Could not disconnect.");
+      else setError(e instanceof Error ? e.message : t("connect.appsRevokeFail"));
     } finally {
       setBusy(null);
     }
@@ -144,7 +146,7 @@ export function AppsClient() {
       await load();
     } catch (e) {
       if (isSignedOut(e)) pause({ kind: "create" });
-      else setError(e instanceof Error ? e.message : "Could not create the token.");
+      else setError(e instanceof Error ? e.message : t("connect.appsCreateFail"));
     } finally {
       setBusy(null);
     }
@@ -166,69 +168,70 @@ export function AppsClient() {
     <div className="terminal-host partner-connect mcp-connect">
       <header className="connect-header">
         <BrandLockup />
-        <span className="connect-header-label"><ShieldCheck size={14} aria-hidden /> Connected apps</span>
+        <span className="connect-header-label"><ShieldCheck size={14} aria-hidden /> {t("connect.appsLink")}</span>
       </header>
       <main className="connect-main">
         <div className="connect-context">
-          <span className="connect-eyebrow">WHO CAN REACH YOUR AGENT</span>
-          <h1>Connected<br />apps.</h1>
-          <p>AI assistants you connected (Claude, Codex and others) and personal access tokens. Disconnecting takes effect on the app’s next request. Your agent keeps running either way.</p>
-          {listing && <p className="mcp-note">Server address: <code>{listing.endpoint}</code> · <a href="/connect/mcp">How to connect</a></p>}
+          <span className="connect-eyebrow">{t("connect.appsEyebrow")}</span>
+          <h1>{t("connect.appsTitleA")}<br />{t("connect.appsTitleB")}</h1>
+          <p>{t("connect.appsIntro")}</p>
+          {listing && <p className="mcp-note">{t("connect.appsServer")} <code>{listing.endpoint}</code> · <a href="/connect/mcp">{t("connect.appsHowTo")}</a></p>}
         </div>
         <section className="connect-panel" aria-busy={loading}>
-          {loading && <div className="connect-wait" role="status"><span className="connect-spinner" aria-hidden />Loading…</div>}
+          {loading && <div className="connect-wait" role="status"><span className="connect-spinner" aria-hidden />{t("connect.loading")}</div>}
           {!loading && signedOut && <>
-            <h2>{pending ? `Your session ended; sign in to finish ${pending.kind === "revoke" ? `disconnecting ${pending.name}` : "creating the token"}.` : "Sign in to see your connected apps."}</h2>
-            {pending && <p className="mcp-note">Nothing was {pending.kind === "revoke" ? "disconnected" : "created"} yet. Once you are signed in, it is finished as you pressed it.</p>}
+            <h2>{pending ? t(pending.kind === "revoke" ? "connect.appsResumeRevoke" : "connect.appsResumeCreate", pending.kind === "revoke" ? { name: pending.name } : undefined) : t("connect.appsSignin")}</h2>
+            {pending && <p className="mcp-note">{t("connect.appsPendingNote", { what: t(pending.kind === "revoke" ? "connect.appsWasDisconnected" : "connect.appsWasCreated") })}</p>}
             <SignIn onDone={() => void afterSignIn()} />
           </>}
           {/* The controls are hidden while signed out: nothing pressed there could be sent. */}
           {!loading && listing && !signedOut && <>
             {/* Nothing connected: offer the same one-click install as the connect hub, not a bare address. */}
             {listing.connections.length === 0 && <div className="mcp-hub-empty">
-              <p className="mcp-note">Nothing is connected. Add Merrymen to Claude in one click, or pick another assistant.</p>
-              <a className="flow-primary" href={installLinks(listing.endpoint).claude} target="_blank" rel="noopener noreferrer">Add Merrymen to Claude<span className="sr-only"> (opens in a new tab)</span></a>
+              <p className="mcp-note">{t("connect.appsEmpty")}</p>
+              <a className="flow-primary" href={installLinks(listing.endpoint).claude} target="_blank" rel="noopener noreferrer">{t("connect.appsAddClaude")}<span className="sr-only">{t("connect.newTab")}</span></a>
+              {/* Source-pinned by mcp-connect.test.ts ("the terminal's ways in"): keep this anchor verbatim. */}
               <a className="connect-cancel" href="/connect/mcp">Other assistants</a>
             </div>}
             <ul className="mcp-apps">{listing.connections.map((c) => (
               <li key={c.id} className="mcp-app">
                 <header>
                   <div>
-                    <h3>{c.kind === "personal" ? <><KeyRound size={14} aria-hidden /> {c.clientName ?? "Personal token"}</> : <><Plug size={14} aria-hidden /> {c.clientName ?? c.clientHost ?? "AI assistant"}</>}</h3>
-                    <div className="mcp-meta">{c.kind === "personal" ? "Personal access token" : `via ${c.clientHost ?? c.clientId}`} · connected {when(c.createdAt)} · last used {when(c.lastUsedAt)}</div>
+                    <h3>{c.kind === "personal" ? <><KeyRound size={14} aria-hidden /> {c.clientName ?? t("connect.appsPersonal")}</> : <><Plug size={14} aria-hidden /> {c.clientName ?? c.clientHost ?? t("connect.appsAi")}</>}</h3>
+                    <div className="mcp-meta">{c.kind === "personal" ? t("connect.appsPersonalKind") : t("connect.appsVia", { host: c.clientHost ?? c.clientId })} · {t("connect.appsConnectedAt", { when: when(c.createdAt) })} · {t("connect.appsLastUsed", { when: when(c.lastUsedAt) })}</div>
                     {/* The same app can be connected twice, once per address: say which this one is. */}
-                    {c.profile === "directory" && <div className="mcp-meta">Via the Claude directory listing, which can never suggest trades, setting changes or posts</div>}
-                    <div className="mcp-meta">Agents: {c.agentSlugs.length ? c.agentSlugs.join(", ") : "none (research only)"}</div>
+                    {c.profile === "directory" && <div className="mcp-meta">{t("connect.appsDirectory")}</div>}
+                    <div className="mcp-meta">{t("connect.appsAgents", { list: c.agentSlugs.length ? c.agentSlugs.join(", ") : t("connect.appsNoAgents") })}</div>
                   </div>
                 </header>
                 <ul className="mcp-tags">{c.scopes.filter((s) => s.id !== "offline_access").map((s) => <li key={s.id} className={s.level === "sensitive" ? "sensitive" : ""}>{s.title}</li>)}</ul>
-                {c.recent.length > 0 && <details><summary>Recent activity</summary><ul className="mcp-activity">{c.recent.map((r, i) => <li key={i}>{when(r.at)} · {r.action.replace(/^tool:/, "")} · {r.outcome}</li>)}</ul></details>}
+                {c.recent.length > 0 && <details><summary>{t("connect.appsRecent")}</summary><ul className="mcp-activity">{c.recent.map((r, i) => <li key={i}>{when(r.at)} · {r.action.replace(/^tool:/, "")} · {r.outcome}</li>)}</ul></details>}
                 {confirm === c.id
-                  ? <div className="connect-disconnect"><p>Disconnect {c.clientName ?? "this app"}? It will stop working immediately, and anything it prepared that you have not approved yet is cancelled.</p><div><button className="connect-danger" disabled={busy === c.id} onClick={() => void revoke(c.id, c.clientName ?? c.clientHost ?? "this app")}>{busy === c.id ? "Disconnecting…" : "Disconnect"}</button><button className="connect-cancel" onClick={() => setConfirm(null)}>Keep</button></div></div>
-                  : <button className="connect-cancel" onClick={() => setConfirm(c.id)}><Unplug size={15} aria-hidden /> Disconnect</button>}
+                  ? <div className="connect-disconnect"><p>{t("connect.appsDisconnectQ", { name: c.clientName ?? t("connect.appsThisApp") })}</p><div><button className="connect-danger" disabled={busy === c.id} onClick={() => void revoke(c.id, c.clientName ?? c.clientHost ?? t("connect.appsThisApp"))}>{busy === c.id ? t("connect.disconnecting") : t("connect.appsDisconnect")}</button><button className="connect-cancel" onClick={() => setConfirm(null)}>{t("connect.appsKeep")}</button></div></div>
+                  : <button className="connect-cancel" onClick={() => setConfirm(c.id)}><Unplug size={15} aria-hidden /> {t("connect.appsDisconnect")}</button>}
               </li>
             ))}</ul>
 
-            {issued && <div className="connect-boundary"><KeyRound size={18} aria-hidden /><div><p>Copy this token now; it won’t be shown again. It expires {when(issued.expires_at)}.</p><p className="mcp-token">{issued.token}</p></div></div>}
+            {issued && <div className="connect-boundary"><KeyRound size={18} aria-hidden /><div><p>{t("connect.appsTokenReady", { when: when(issued.expires_at) })}</p><p className="mcp-token">{issued.token}</p></div></div>}
 
             {creating
               ? <div className="mcp-app">
-                <h3>New personal access token</h3>
-                <p className="mcp-note">For assistants that can’t sign in through a browser. It can only do what you tick, only for your own agent, and expires on its own.</p>
-                <label className="mcp-field">Name<input value={label} maxLength={60} onChange={(e) => setLabel(e.target.value)} /></label>
-                <label className="mcp-field">Expires after<select value={days} onChange={(e) => setDays(Number(e.target.value))}>{[7, 30, 90].map((d) => <option key={d} value={d}>{d} days</option>)}</select></label>
+                <h3>{t("connect.appsNewToken")}</h3>
+                <p className="mcp-note">{t("connect.appsTokenNote")}</p>
+                <label className="mcp-field">{t("connect.appsName")}<input value={label} maxLength={60} onChange={(e) => setLabel(e.target.value)} /></label>
+                <label className="mcp-field">{t("connect.appsExpiresAfter")}<select value={days} onChange={(e) => setDays(Number(e.target.value))}>{[7, 30, 90].map((d) => <option key={d} value={d}>{t("connect.appsDays", { d })}</option>)}</select></label>
                 <ul className="mcp-checks">{listing.available_scopes.map((s) => (
                   <li key={s.id}><label><input type="checkbox" checked={tokenScopes.has(s.id)} onChange={() => { const n = new Set(tokenScopes); if (n.has(s.id)) n.delete(s.id); else n.add(s.id); setTokenScopes(n); }} /><span><strong>{s.title}</strong><span>{s.detail}</span></span></label></li>
                 ))}</ul>
-                <button className="flow-primary" disabled={busy === "create" || !tokenScopes.size} onClick={() => void createToken()}>{busy === "create" ? "Creating…" : "Create token"}</button>
-                <button className="connect-cancel" onClick={() => setCreating(false)}>Cancel</button>
+                <button className="flow-primary" disabled={busy === "create" || !tokenScopes.size} onClick={() => void createToken()}>{busy === "create" ? t("connect.appsCreating") : t("connect.appsCreate")}</button>
+                <button className="connect-cancel" onClick={() => setCreating(false)}>{t("connect.cancel")}</button>
               </div>
-              : <button className="connect-cancel" onClick={() => { setCreating(true); setIssued(null); }}><KeyRound size={15} aria-hidden /> Create a personal access token</button>}
+              : <button className="connect-cancel" onClick={() => { setCreating(true); setIssued(null); }}><KeyRound size={15} aria-hidden /> {t("connect.appsCreateCta")}</button>}
           </>}
-          {error && <div className="connect-error" role="alert"><p>{error}</p><button onClick={() => void load()}>Try again</button></div>}
+          {error && <div className="connect-error" role="alert"><p>{error}</p><button onClick={() => void load()}>{t("connect.tryAgain")}</button></div>}
         </section>
       </main>
-      <footer className="connect-footer">Merrymen never shares your keys or moves funds for a connected app.</footer>
+      <footer className="connect-footer">{t("connect.appsFooter")}</footer>
     </div>
   );
 }

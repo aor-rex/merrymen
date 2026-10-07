@@ -12,6 +12,7 @@ import {
 import { strategyName } from "../strategy";
 import { Empty, ReadEmpty, Face, Stamp, NameBlock } from "../ui";
 import { unrankedLabel, unrankedShort } from "@/lib/rank-pnl";
+import { useT } from "@/lib/i18n";
 
 type WindowId = "24H" | "7D" | "30D" | "ALL";
 
@@ -54,6 +55,7 @@ export function Board({
 }) {
   const [win, setWin] = useState<WindowId>("ALL");
   const [showAll, setShowAll] = useState(false);
+  const t = useT();
   const rows = useMemo(
     () => rank(agents, theses, mine, win),
     [agents, theses, mine, win],
@@ -65,8 +67,8 @@ export function Board({
   return (
     <div className={`page board-page${preview ? " board-preview" : ""}`}>
       <header className="board-head">
-        {preview ? <h2>Leaderboard</h2> : compact ? <h2>Return</h2> : <h1 className="top-title">Leaderboard</h1>}
-        {preview && rows.length > 5 && <button onClick={()=>setShowAll(value=>!value)}>{showAll ? "Show fewer" : `View all ${rows.length}`}</button>}
+        {preview ? <h2>{t("board.leaderboard")}</h2> : compact ? <h2>{t("board.compactReturn")}</h2> : <h1 className="top-title">{t("board.leaderboard")}</h1>}
+        {preview && rows.length > 5 && <button onClick={()=>setShowAll(value=>!value)}>{showAll ? t("board.showFewer") : t("board.viewAll", { count: rows.length })}</button>}
         {!preview && rows.length > 0 && (
           <div className="wins">
             {WINDOWS.map((w) => (
@@ -90,7 +92,7 @@ export function Board({
       {!preview && (
         // ONE LINE ON PURPOSE: captions.test.ts reads this file as text, so a
         // wrapped sentence breaks a guard that is about the words being present.
-        <details className="ranking-help"><summary>How returns are measured</summary><p>All agents are listed; only eligible live returns are ranked. Paper returns measure the change since the first recorded valuation of the current paper period and remain outside live rankings. Inactive agents remain unranked. No deposit means no capital to measure a return against. No completed trades means no return to measure. Dividing a pretend book by a real deposit publishes a number that never happened, so returns without evidenced capital stay unranked.</p></details>
+        <details className="ranking-help"><summary>{t("board.howMeasured")}</summary><p>{t("board.measureNote")}</p></details>
       )}
 
       {rows.length === 0 ? (
@@ -99,17 +101,17 @@ export function Board({
           state={read}
           // Not "nobody" when accounts were folded away: they ran, and the line
           // below counts them.
-          title={folded > 0 ? "No agent is running right now." : "Nobody has traded yet."}
-          action={preview ? undefined : { label: "Fund an agent", onClick: onDesk }}
+          title={folded > 0 ? t("board.emptyRunning") : t("board.emptyNoTrades")}
+          action={preview ? undefined : { label: t("board.fundAgent"), onClick: onDesk }}
         />
       ) : (
         <div className="board">
           <div className="desktop-board-columns" aria-hidden="true">
             <span>#</span>
-            <span>Agent</span>
-            <span>Strategy / trades</span>
-            <span>Capital</span>
-            <span>Return</span>
+            <span>{t("board.colAgent")}</span>
+            <span>{t("board.colStrategyTrades")}</span>
+            <span>{t("board.colCapital")}</span>
+            <span>{t("board.colReturn")}</span>
           </div>
           {(preview && !showAll ? rows.slice(0,5) : rows).map((r) => (
             <Rank
@@ -117,6 +119,7 @@ export function Board({
               row={r}
               you={r.agent.slug === mineSlug}
               onProfile={onProfile}
+              t={t}
             />
           ))}
         </div>
@@ -131,7 +134,7 @@ export function Board({
           className="board-retired"
           title="Accounts nothing is running any more: killed, expired, or never linked to a named agent. One agent re-granted can leave more than one."
         >
-          Retired accounts ({folded})
+          {t("board.retired", { count: folded })}
         </p>
       )}
     </div>
@@ -142,10 +145,12 @@ function Rank({
   row,
   you,
   onProfile,
+  t,
 }: {
   row: Row;
   you: boolean;
   onProfile: (slug: string) => void;
+  t: ReturnType<typeof useT>;
 }) {
   const a = row.agent;
   const displayedReturn = a.mode === "paper" ? a.paperPnlBps ?? null : row.ret;
@@ -164,12 +169,12 @@ function Rank({
         <div className="rank-who">
           <div className="rank-name">
             <NameBlock title={a.name} owner={a.owner} verified={a.ownerVerified === true} />
-            {you && <i className="tag on">you</i>}
+            {you && <i className="tag on">{t("board.youTag")}</i>}
           </div>
           <div className="rank-meta">
             {a.glance.known === false ? null : <Stamp>{strategyName(a.glance.id)}</Stamp>}
-            <span className="rank-trades">{tradeLine(a)}</span>
-            {a.mode && a.mode !== "live" && <Stamp>{a.mode === "paper" ? "Paper" : "Inactive"}</Stamp>}
+            <span className="rank-trades">{tradeLine(a, t)}</span>
+            {a.mode && a.mode !== "live" && <Stamp>{a.mode === "paper" ? t("board.paper") : t("board.inactive")}</Stamp>}
           </div>
         </div>
         <div className="rank-nums">
@@ -181,7 +186,7 @@ function Rank({
             filled is not an empty column, it is a promise the page cannot keep.
           */}
           <span title={a.unrankedWhy ? unrankedLabel(a.unrankedWhy) : undefined} className={`chg ${displayedReturn == null ? "" : displayedReturn >= 0 ? "up" : "down"}`}>
-            {displayedReturn == null ? a.unrankedWhy ? unrankedShort(a.unrankedWhy) : "Unranked" : pctBps(displayedReturn)}
+            {displayedReturn == null ? a.unrankedWhy ? unrankedShort(a.unrankedWhy) : t("board.unranked") : pctBps(displayedReturn)}
           </span>
         </div>
       </button>
@@ -204,13 +209,13 @@ function Rank({
  * together is what re-arms that. A simulated fill is a real thing to have
  * done, and it is not a trade.
  */
-export function tradeLine(agent: LiveAgent): string {
-  if (agent.mode === "paper") return `${agent.filledPaper ?? 0} paper trades`;
+export function tradeLine(agent: LiveAgent, t?: ReturnType<typeof useT>): string {
+  if (agent.mode === "paper") return t ? t("board.paperTrades", { count: agent.filledPaper ?? 0 }) : `${agent.filledPaper ?? 0} paper trades`;
   const landed = agent.landed ?? 0;
-  if (landed > 0) return `${landed} trade${landed === 1 ? "" : "s"}`;
+  if (landed > 0) return landed === 1 ? (t ? t("board.tradeOne") : "1 trade") : t ? t("board.tradeMany", { count: landed }) : `${landed} trades`;
   const paper = agent.filledPaper ?? 0;
-  if (paper > 0) return `${paper} on paper`;
-  return "No trades yet";
+  if (paper > 0) return t ? t("board.paperOnly", { count: paper }) : `${paper} on paper`;
+  return t ? t("board.noTrades") : "No trades yet";
 }
 
 function rank(

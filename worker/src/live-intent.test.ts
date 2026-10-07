@@ -320,10 +320,17 @@ describe("switching INTO paper cannot be taken silently", () => {
       path.join(__dirname, "..", "..", "web", "src", "terminal", "screens", "Settings.tsx"),
       "utf8",
     );
+    const EN_TEXT = readFileSync(
+      path.join(__dirname, "..", "..", "web", "src", "lib", "messages", "en.ts"),
+      "utf8",
+    );
     // Rendered only on the way OUT of live — an owner who was never live has no
     // real position to strand, and a warning they cannot act on is noise.
     assert.match(settings, /!liveTradingVal && \(view\.values\.liveTradingEnabled/);
-    assert.match(settings, /stops managing them/i);
+    // i18n: the sentence lives in the catalogue now; pin the key at the call
+    // site and the wording in EN.
+    assert.match(settings, /t\("settings\.text\.inPaperModeIt"\)/);
+    assert.match(EN_TEXT, /stops managing them/);
   });
 });
 

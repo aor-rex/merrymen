@@ -49,6 +49,10 @@ const PANEL = readFileSync(
 const code = (s: string) => s.replace(/\/\*[\s\S]*?\*\//g, " ").replace(/\/\/[^\n]*/g, " ");
 const BIN_CODE = code(BIN);
 const PANEL_CODE = code(PANEL);
+const EN_TEXT = readFileSync(
+  path.join(__dirname, "..", "..", "web", "src", "lib", "messages", "en.ts"),
+  "utf8",
+);
 
 describe("the CLI prompt discloses the class vault", () => {
   it("reads the holdings off the plan at all", () => {
@@ -115,9 +119,14 @@ describe("the hosted panel discloses the class vault", () => {
   });
 
   it("puts the three headings in the confirm dialog, not a flat list", () => {
-    assert.match(PANEL_CODE, /"CLASS VAULT"/, "the vault must be named in the dialog");
-    assert.match(PANEL_CODE, /SMART ACCOUNT \$\{smartAccount/, "and the account");
-    assert.match(PANEL_CODE, /"DESTINATION"/, "and the destination");
+    // i18n: the headings live in the catalogue now; pin the keys at the call
+    // site and the wording in EN.
+    assert.match(PANEL_CODE, /t\("common\.recVaultHead"\)/, "the vault must be named in the dialog");
+    assert.match(PANEL_CODE, /t\("common\.recAcctHead"\)/, "and the account");
+    assert.match(PANEL_CODE, /t\("common\.recConfirmDest"\)/, "and the destination");
+    assert.match(EN_TEXT, /CLASS VAULT/);
+    assert.match(EN_TEXT, /SMART ACCOUNT/);
+    assert.match(EN_TEXT, /DESTINATION/);
   });
 
   it("renders the vault's holdings on screen, keyed by token not symbol", () => {
@@ -129,10 +138,13 @@ describe("the hosted panel discloses the class vault", () => {
   });
 
   it("says the vault is a separate contract, because that is why it needs saying", () => {
+    // i18n: the sentence lives in the catalogue now; pin the key at the call
+    // site and the wording in EN.
     assert.match(
       PANEL_CODE,
-      /Held in a separate contract, not in the account/,
+      /t\("common\.recVaultNote"\)/,
       "an owner must be told why this money was not in the balance list",
     );
+    assert.match(EN_TEXT, /Held in a separate contract, not in the account/);
   });
 });

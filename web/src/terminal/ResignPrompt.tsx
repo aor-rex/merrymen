@@ -63,6 +63,7 @@ import { usePrivyOwner } from "@/terminal/usePrivyOwner";
  * about their money, which is not a rule to leave unexecutable.
  */
 import { resignPromptApplies, resignPromptState } from "./resign-prompt-state";
+import { useT } from "@/lib/i18n";
 
 /**
  * One key per tenant per wall release.
@@ -95,6 +96,7 @@ export function ResignPrompt({
   /** Where the one signing control lives. Supplied by the shell, not built here. */
   href: string;
 }) {
+  const t = useT();
   const dialog = useRef<HTMLDialogElement>(null);
   const [acknowledged, setAcknowledged] = useState<boolean | null>(null);
   const privyOwner = usePrivyOwner();
@@ -155,8 +157,8 @@ export function ResignPrompt({
         onCancel={(event) => { event.preventDefault(); dismiss(); }}>
         <div className="portfolio-dialog-header">
           <div>
-            <h2 id="resign-prompt-title">Your trading permission is out of date</h2>
-            <p>It was signed before the last update, so your agent may refuse trades it looks able to make.</p>
+            <h2 id="resign-prompt-title">{t("common.resignTitle")}</h2>
+            <p>{t("common.resignBody")}</p>
           </div>
           <button type="button" className="mm-btn" onClick={dismiss} aria-label="Close">✕</button>
         </div>
@@ -165,11 +167,11 @@ export function ResignPrompt({
               nothing: it re-seals the permission around today's settings and
               today's wall. The grant screen shows the diff before signing —
               this says enough to decide to go there, and no more. */}
-          <p>Renewal first revokes the old permissions on-chain, which requires network fees, then asks you to sign the replacement. Your account address stays the same.</p>
-          <p className="mm-hint">The new permission is sealed around today’s settings, so anything you have changed since you last signed takes effect at the same time. You will see what changes before you sign.</p>
+          <p>{t("common.resignRenew")}</p>
+          <p className="mm-hint">{t("common.resignSealed")}</p>
           <div className="resign-actions">
-            <button type="button" className="mm-btn primary" onClick={go}>Re-sign my permission →</button>
-            <button type="button" className="mm-btn" onClick={dismiss}>Not now</button>
+            <button type="button" className="mm-btn primary" onClick={go}>{t("common.resignPermission")}</button>
+            <button type="button" className="mm-btn" onClick={dismiss}>{t("common.resignNotNow")}</button>
           </div>
         </div>
       </dialog>
@@ -183,9 +185,9 @@ export function ResignPrompt({
           inline, and present for as long as the permission is actually old. */}
       {shown === "strip" && (
         <aside className="desk-notice resign-strip" aria-label="Trading permission out of date">
-          <strong>Trading permission is out of date</strong>
-          <p>Signed before the last update. Your agent may refuse trades it looks able to make.</p>
-          <button type="button" className="mm-btn" onClick={go}>Review renewal and fees →</button>
+          <strong>{t("common.resignStripTitle")}</strong>
+          <p>{t("common.resignStripBody")}</p>
+          <button type="button" className="mm-btn" onClick={go}>{t("common.resignReviewFees")}</button>
         </aside>
       )}
     </>

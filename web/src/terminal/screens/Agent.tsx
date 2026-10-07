@@ -37,6 +37,7 @@ import type { TierView } from "@/app/api/tier/route";
 import { loadTier } from "../tier";
 import { count } from "@/lib/format";
 import { ENERGY_NOTICE_PREFIX, type EnergyStatus } from "@merrymen/core";
+import { useT } from "@/lib/i18n";
 import { energyRemedies, energyView, workerSaysFull } from "../energy-view";
 import { EnergyNote } from "../EnergyNote";
 
@@ -132,6 +133,7 @@ export function Agent({
   const setPending = chat.setProposal;
   /** The card is being carried out — the controller's, so every screen drawing it agrees. */
   const running = chat.confirming;
+  const t = useT();
   const [expanded, setExpanded] = useState(false);
   const [view, setView] = useState<"positions" | "trades">("positions");
   const viewport = useRef<HTMLElement>(null);
@@ -542,7 +544,7 @@ export function Agent({
               signature anyway, and `live-not-enabled` is not broken at all. */}
           {blocked.resign && (
             <button type="button" onClick={onResign}>
-              Fix it — re-sign my permission →
+              {t("agent.resign")}
             </button>
           )}
           {/* THE ONE CONTROL THAT ACTUALLY CHANGES THIS STATE. Without it the
@@ -550,7 +552,7 @@ export function Agent({
               shape of the original complaint. */}
           {liveBlocker === "live-not-enabled" && (
             <button type="button" onClick={onSettings}>
-              Start live trading →
+              {t("agent.startLive")}
             </button>
           )}
         </section>
@@ -584,7 +586,7 @@ export function Agent({
         </div>
         <span className={`desk-status ${stopped ? "paused" : ""}`}>
           <i />
-          {mine.statusLabel ?? "Offline"}
+          {mine.statusLabel ?? t("agent.offline")}
         </span>
       </header>
       <section className="desk-portfolio">
@@ -596,18 +598,20 @@ export function Agent({
           onClick={() => setExpanded((value) => !value)}
         >
           <div>
-            <span className="account-label">Agent balance</span>
+            <span className="account-label">{t("agent.balance")}</span>
             <strong className="desk-equity">
               <BalanceFigure value={mine.equity} />
             </strong>
             <span className={mine.chg24 == null ? "meta" : mine.chg24 < 0 ? "down" : "up"}>
               {mine.chg24 == null
-                ? "Daily change unavailable"
-                : `${mine.chg24 >= 0 ? "+" : "−"}${money(Math.abs(mine.chg24))}${change == null ? "" : ` (${pctPts(change)})`} today`}
+                ? t("agent.changeUnavailable")
+                : t("agent.changeToday", {
+                    value: `${mine.chg24 >= 0 ? "+" : "−"}${money(Math.abs(mine.chg24))}${change == null ? "" : ` (${pctPts(change)})`}`,
+                  })}
             </span>
           </div>
           <span className="portfolio-toggle">
-            Portfolio{" "}
+            {t("agent.portfolio")}{" "}
             <ChevronDown size={16} strokeWidth={1.75} aria-hidden="true" />
           </span>
         </button>
@@ -615,10 +619,10 @@ export function Agent({
           <div className="agent-portfolio-meta">
             <span>
               {positions.length}{" "}
-              {positions.length === 1 ? "position" : "positions"}
+              {positions.length === 1 ? t("agent.positionOne") : t("agent.positionMany")}
             </span>
             {mine.glance.cashUsd != null && (
-              <span>{money(mine.glance.cashUsd)} cash</span>
+              <span>{t("agent.cash", { amount: money(mine.glance.cashUsd) })}</span>
             )}
           </div>
         }
@@ -632,7 +636,7 @@ export function Agent({
         >
           <header className="portfolio-dialog-header">
             <div>
-              <h2 id="portfolio-title">Portfolio</h2>
+              <h2 id="portfolio-title">{t("agent.portfolio")}</h2>
               <p>
                 {mine.name} · {money(mine.equity)}
               </p>
@@ -647,10 +651,10 @@ export function Agent({
           </header>
           <div className="portfolio-actions">
             <button type="button" onClick={onDeposit}>
-              Add funds
+              {t("agent.addFunds")}
             </button>
             <button type="button" onClick={onWithdraw}>
-              Withdraw
+              {t("agent.withdraw")}
             </button>
           </div>
           <div className="portfolio-body">
@@ -664,7 +668,7 @@ export function Agent({
                 aria-pressed={view === "positions"}
                 onClick={() => setView("positions")}
               >
-                Positions · {positions.length}
+                {t("agent.positionsTab", { count: positions.length })}
               </button>
               <button
                 type="button"
@@ -675,13 +679,16 @@ export function Agent({
                     one line in the list below, and counting them here called
                     thirty ops-cap refusals "Trades · 30". "+" when the tape
                     came back full: there may be more past its end. */}
-                Trades · {swapRowsOfDesk(mine.moves).filter(isTrade).length}{mine.moves.length >= DESK_TAPE_ROWS ? "+" : ""}
+                {t("agent.tradesTab", {
+                  count: swapRowsOfDesk(mine.moves).filter(isTrade).length,
+                  plus: mine.moves.length >= DESK_TAPE_ROWS ? "+" : "",
+                })}
               </button>
             </div>
             {view === "positions" ? (
               <>
                 {positions.length === 0 && (
-                  <Empty compact kind="positions" title="No positions reported yet."/>
+                  <Empty compact kind="positions" title={t("agent.noPositions")}/>
                 )}
                 {positions.map((p) => {
                   const token = tokens.find(
@@ -719,7 +726,7 @@ export function Agent({
                 </div>
                 {mine.glance.vaultUsd != null && (
                   <div className="desk-cash">
-                    <span>In vaults</span>
+                    <span>{t("agent.inVaults")}</span>
                     <strong>{money(mine.glance.vaultUsd)}</strong>
                   </div>
                 )}
@@ -737,7 +744,7 @@ export function Agent({
                   showMoney
                   allowPnlCards
                   tapeFull={mine.moves.length >= DESK_TAPE_ROWS}
-                  emptyTitle="No trades yet."
+                  emptyTitle={t("agent.noTrades")}
                   onToken={onToken}
                 />
               </div>
@@ -747,9 +754,9 @@ export function Agent({
               className="desk-text-button"
               onClick={onLimits}
             >
-              Trading limits{" "}
+              {t("agent.limits")}{" "}
               <span>
-                {money(perTrade)} / trade{" "}
+                {t("agent.perTrade", { amount: money(perTrade) })}{" "}
                 <ArrowUpRight size={14} aria-hidden="true" />
               </span>
             </button>
@@ -797,7 +804,7 @@ export function Agent({
         {circleLocked && (
           <section className="desk-circle-locked" role="status">
             <strong>
-              {strategyName(mine.glance.id)} is a Merry Circle strategy — it opens nothing new right now.
+              {t("agent.circleTitle", { strategy: strategyName(mine.glance.id) })}
             </strong>
             {/* THE REMEDIES, NONE OF THEM "ADD FUNDS". This used to tell the
                 owner that money was not the fix, which stopped being true the
@@ -808,22 +815,18 @@ export function Agent({
                 `?? 0`, which rendered "you hold 0" for a balance nobody read. */}
             <p>
               {tier?.why === "unreadable"
-                ? "We couldn't read your $MERRYMEN balance just now, so this may clear on its own. That's our read failing, not your wallet."
-                : `Your agent is armed and watching, but this strategy only opens new trades while your wallet and my account hold ${count(
-                    tier?.needTokens ?? null,
-                  )} $MERRYMEN between them — right now ${
-                    tier?.tokens == null ? "I couldn't read how many" : count(tier.tokens)
-                  }. Until then it leaves its basket as it is; positions in a class vault are still closed by their own exit rules. Switch to Steady basket or Strategist, which run for everyone, or top up: ${
-                    remedies.sendToAgent
-                      ? `send $MERRYMEN on Robinhood Chain to my account${
-                          remedies.usdg === "ready" ? ", or send USDG there and ask me to get my $MERRYMEN" : ""
-                        }`
-                      : "keep $MERRYMEN on Robinhood Chain in your own wallet"
-                  }.`}
+                ? t("agent.circleUnreadable")
+                : t("agent.circleBody", {
+                    need: count(tier?.needTokens ?? null),
+                    have: tier?.tokens == null ? t("agent.haveUnknown") : count(tier.tokens),
+                    remedy: remedies.sendToAgent
+                      ? `${t("agent.sendToSelf")}${remedies.usdg === "ready" ? t("agent.sendExtra") : ""}`
+                      : t("agent.keepSelf"),
+                  })}
             </p>
             {tier?.why !== "unreadable" && remedies.sendToAgent && (
               <button type="button" onClick={onDeposit}>
-                Show my account address →
+                {t("agent.showAddress")}
               </button>
             )}
           </section>
@@ -849,7 +852,7 @@ export function Agent({
         )}
         <Proposals onResign={onResign} />
         <div className="chat-divider">
-          <span>Conversation</span>
+          <span>{t("agent.conversation")}</span>
         </div>
         <div className="desk-reply">
           <Face name={mine.name} slug={mine.slug} small />
@@ -857,10 +860,10 @@ export function Agent({
             <strong>{mine.name}</strong>
             <p>
               {stopped
-                ? "I’m not trading right now. You can review my portfolio and trading limits here."
+                ? t("agent.paused")
                 : latest
-                  ? "Here’s my latest recorded trade."
-                  : "I haven’t recorded a trade yet. Ask me about my strategy or your trading limits."}
+                  ? t("agent.latestTrade")
+                  : t("agent.noTradeYet")}
             </p>
             {latest && (
               <article className="conversation-trade">
@@ -876,7 +879,7 @@ export function Agent({
                    * asserted the fill.
                    */}
                   {capitalise(badgeOf(latest).label)} ·{" "}
-                  {ageOf(latest) ? `${ageOf(latest)} ago` : "Recorded"}
+                  {ageOf(latest) ? t("agent.tradeAgo", { age: ageOf(latest) }) : t("agent.recorded")}
                   {latest.paper ? " · Paper" : ""}
                 </div>
                 <TradeTokenCard
@@ -886,7 +889,7 @@ export function Agent({
                 />
                 <p>
                   {latest.reason ??
-                    "No explanation was recorded for this trade."}
+                    t("agent.noExplanation")}
                 </p>
                 <button
                   type="button"
@@ -895,14 +898,14 @@ export function Agent({
                     setView("trades");
                   }}
                 >
-                  View trade history{" "}
+                  {t("agent.viewHistory")}{" "}
                   <ArrowUpRight size={14} aria-hidden="true" />
                 </button>
               </article>
             )}
             {!latest && mine.thesis && (
               <blockquote>
-                <span className="strategy-caption">My approach</span>
+                <span className="strategy-caption">{t("agent.approach")}</span>
                 {mine.thesis}
               </blockquote>
             )}
@@ -968,7 +971,7 @@ export function Agent({
             <p className="desk-confirm-say">{commandFor(pending.id)!.say(pending.args)}</p>
             <div className="desk-confirm-row">
               <button type="button" onClick={confirm} disabled={running}>
-                {running ? "Doing it…" : commandFor(pending.id)!.via === "navigate" ? "Take me there" : "Yes, do it"}
+                {running ? t("agent.doingIt") : commandFor(pending.id)!.via === "navigate" ? t("agent.takeMeThere") : t("agent.yesDoIt")}
               </button>
               <button
                 type="button"
@@ -976,14 +979,14 @@ export function Agent({
                 onClick={() => setPending(null)}
                 disabled={running}
               >
-                Not now
+                {t("agent.notNow")}
               </button>
             </div>
           </section>
         )}
         {away && (
           <button type="button" className="chat-jump" onClick={scrollLatest}>
-            <ArrowDown size={14} aria-hidden="true" /> Latest message
+            <ArrowDown size={14} aria-hidden="true" /> {t("agent.latestMessage")}
           </button>
         )}
         {/* WHAT TO ASK NEXT, about THIS agent — not the same three on an empty
@@ -1033,7 +1036,7 @@ export function Agent({
             value={ask}
             maxLength={2000}
             onChange={(e) => setAsk(e.target.value)}
-            placeholder={`Message ${mine.name}…`}
+            placeholder={t("agent.messageTo", { name: mine.name })}
           />
           <button
             type="submit"
@@ -1074,6 +1077,7 @@ function ChatLine({
   onToken: (id: string) => void;
   onRetry?: () => void;
 }) {
+  const t = useT();
   const receipt: OrderReceipt | null | undefined = m.order?.receipt;
   // ONE LINE, ONE FIGURE. A receipt joined to its fill shows the worker's
   // figure on the card too: for a sell the tape's size is the order's, and the
@@ -1120,10 +1124,10 @@ function ChatLine({
             <div className="chat-failed-actions">
               {m.retry && onRetry && (
                 <button type="button" className="chat-retry" onClick={onRetry}>
-                  Retry
+                  {t("agent.retry")}
                 </button>
               )}
-              {m.failed === "no-llm" && <a href="/settings">Open Settings</a>}
+              {m.failed === "no-llm" && <a href="/settings">{t("agent.openSettings")}</a>}
             </div>
           ) : (
             <CopyReply text={m.text} />
@@ -1135,13 +1139,14 @@ function ChatLine({
 }
 
 function CopyReply({ text }: { text: string }) {
+  const t = useT();
   const [status, setStatus] = useState<"idle" | "copied" | "error">("idle");
   return (
     <div className="chat-message-actions">
       <button
         type="button"
-        aria-label="Copy reply"
-        title="Copy reply"
+        aria-label={t("agent.copyReply")}
+        title={t("agent.copyReply")}
         onClick={async () => {
           try {
             await navigator.clipboard.writeText(text);
@@ -1159,9 +1164,9 @@ function CopyReply({ text }: { text: string }) {
       </button>
       <span role="status">
         {status === "copied"
-          ? "Copied"
+          ? t("agent.copied")
           : status === "error"
-            ? "Couldn’t copy. Select the text to copy it."
+            ? t("agent.copyFailed")
             : ""}
       </span>
     </div>

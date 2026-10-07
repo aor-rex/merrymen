@@ -23,6 +23,9 @@ import { readFileSync } from "node:fs";
  */
 
 import { isAddr, normalizeAddr } from "./address";
+import { EN } from "./messages/en";
+
+const EN_TEXT = Object.values(EN).join("\n");
 
 const SRC = readFileSync(new URL("../components/RecoverPanel.tsx", import.meta.url), "utf8");
 const REAL = "0x7060B218E0B11F37450A8835664fa748dB1FcC1E";
@@ -86,6 +89,7 @@ describe("the confirm dialog shows the address that will be paid", () => {
       /Sweep \$\{list\} to \$\{to\.trim\(\)\}/,
       "the confirm text must show the normalised destination",
     );
-    assert.match(SRC, /Sweep \$\{list\} to \$\{normalizeAddr\(to\)\}/);
+    assert.match(SRC, /t\("common\.recConfirmTitle", \{ list, to: normalizeAddr\(to\) \}\)/);
+    assert.match(EN_TEXT, /Sweep \{list\} to \{to\}\?/);
   });
 });

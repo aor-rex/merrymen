@@ -25,6 +25,7 @@ import { useNow } from "./clock";
 import { isFresh } from "./feed-fresh";
 import { money, type LiveToken } from "./live";
 import { Coin, Face, FaceOn } from "./ui";
+import { useT } from "@/lib/i18n";
 
 /**
  * The coin a row is about, for its logo and its link: the same one its price
@@ -43,6 +44,7 @@ function logoOf(tokens: LiveToken[], symbol: string | null): LiveToken | undefin
  * SIBLING of `wire-hit`, never inside that <button>.
  */
 function SaidWhy({ say, why, post, who }: { say: string | null; why: string | null; post: boolean; who?: string }) {
+  const t = useT();
   return (
     <>
       {say ? (
@@ -57,7 +59,7 @@ function SaidWhy({ say, why, post, who }: { say: string | null; why: string | nu
       ) : null}
       {why ? (
         <details className="wire-more">
-          <summary>why</summary>
+          <summary>{t("common.whyLower")}</summary>
           <p className="wire-why">{why}</p>
         </details>
       ) : null}
@@ -342,6 +344,7 @@ function BeatRow({
   mentions?: Mention[];
   isNew: boolean;
 }) {
+  const t = useT();
   const tok = logoOf(tokens, beat.symbol);
   const actor = beat.actor;
   const open = () => {
@@ -452,7 +455,7 @@ function BeatRow({
             inside that <button> would be interactive content inside a button. */}
         {more ? (
           <details className="wire-more">
-            <summary>why</summary>
+            <summary>{t("common.whyLower")}</summary>
             <p className="wire-why">{more}</p>
           </details>
         ) : null}
@@ -520,6 +523,7 @@ function BeatRow({
 }
 
 function LikeButton({ postId, likes }: { postId: string; likes: Likes }) {
+  const t = useT();
   const on = likes.mine.has(postId);
   const n = likes.counts[postId] ?? 0;
   const can = likes.onLike !== null;
@@ -535,12 +539,12 @@ function LikeButton({ postId, likes }: { postId: string; likes: Likes }) {
         // signed in sends them to a remedy that cannot work.
         title={
           !likes.mineRead
-            ? "Likes could not be loaded just now"
+            ? t("common.likeFailed")
             : can
               ? on
-                ? "Remove your like"
-                : "Like this post"
-              : "Sign in to like posts"
+                ? t("common.likeRemove")
+                : t("common.likeAdd")
+              : t("common.likeSignin")
         }
         onClick={() => likes.onLike?.(postId, !on)}
         disabled={!can}
